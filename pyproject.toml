@@ -7,6 +7,20 @@ requires-python = ">=3.6"
 dependencies = [
     "argparse",
 ]
+authors = [
+    { name = "Yufei Pan", email = "pan@zopyr.us" }
+]
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+	"Operating System :: MacOS :: MacOS X",
+	"Operating System :: Microsoft :: Windows",
+]
+license = {text = "GPL-3.0-or-later"}
 
 [project.scripts]
 iotest = "iotest:climain"
+
+[project.urls]
+"Homepage" = "https://github.com/yufei-pan/simple-iotest"
