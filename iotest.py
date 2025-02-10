@@ -8,7 +8,7 @@ import datetime
 import subprocess
 import json
 
-version = '3.54'
+version = '3.55'
 
 # --------------------------------
 # TeeLogger Inline print only
@@ -45,62 +45,63 @@ def printWithColor(msg, level = 'info'):
     else:
         print(bcolors.info + msg + bcolors.ENDC)
 try:
-    from Tee_Logger import teeLogger
+    import Tee_Logger
 except:
-    class teeLogger:
-        def __init__(self, systemLogFileDir='.', programName='iotest', compressLogAfterMonths=2, deleteLogAfterYears=2, suppressPrintout=False, fileDescriptorLength=15,noLog=True):
-            self.name = programName
-            self.currentDateTime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            self.noLog = True
-            if not noLog:
-                print('Using inline logger, foring noLog...')
-            self.systemLogFileDir = '/dev/null'
-            self.logsDir = '/dev/null'
-            self.logFileDir = '/dev/null'
-            self.logFileName = '/dev/null'
-            self.compressLogAfterMonths = compressLogAfterMonths
-            self.deleteLogAfterYears = deleteLogAfterYears
-            self.suppressPrintout = suppressPrintout
-            self.fileDescriptorLength = fileDescriptorLength
-            self.version = '0.1 inline'
+    class Tee_Logger:
+        version = '0.1 inline'
+        class teeLogger:
+            def __init__(self, systemLogFileDir='.', programName='iotest', compressLogAfterMonths=2, deleteLogAfterYears=2, suppressPrintout=False, fileDescriptorLength=15,noLog=True):
+                self.name = programName
+                self.currentDateTime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                self.noLog = True
+                if not noLog:
+                    print('Using inline logger, foring noLog...')
+                self.systemLogFileDir = '/dev/null'
+                self.logsDir = '/dev/null'
+                self.logFileDir = '/dev/null'
+                self.logFileName = '/dev/null'
+                self.compressLogAfterMonths = compressLogAfterMonths
+                self.deleteLogAfterYears = deleteLogAfterYears
+                self.suppressPrintout = suppressPrintout
+                self.fileDescriptorLength = fileDescriptorLength
+                self.version = Tee_Logger.version
 
-            self.logger = None
+                self.logger = None
 
-        def log_with_caller_info(self, level, msg):
-            return
+            def log_with_caller_info(self, level, msg):
+                return
 
-        def teeok(self, msg):
-            if not self.suppressPrintout:
-                printWithColor(msg, 'okgreen')
-            self.log_with_caller_info('info', msg)
+            def teeok(self, msg):
+                if not self.suppressPrintout:
+                    printWithColor(msg, 'okgreen')
+                self.log_with_caller_info('info', msg)
 
-        def ok(self, msg):
-            self.log_with_caller_info('info', msg)
+            def ok(self, msg):
+                self.log_with_caller_info('info', msg)
 
-        def teeprint(self, msg):
-            if not self.suppressPrintout:
-                printWithColor(msg, 'info')
-            self.log_with_caller_info('info', msg)
+            def teeprint(self, msg):
+                if not self.suppressPrintout:
+                    printWithColor(msg, 'info')
+                self.log_with_caller_info('info', msg)
 
-        def info(self, msg):
-            self.log_with_caller_info('info', msg)
+            def info(self, msg):
+                self.log_with_caller_info('info', msg)
 
-        def teeerror(self, msg):
-            if not self.suppressPrintout:
-                printWithColor(msg, 'error')
-            self.log_with_caller_info('error', msg)
+            def teeerror(self, msg):
+                if not self.suppressPrintout:
+                    printWithColor(msg, 'error')
+                self.log_with_caller_info('error', msg)
 
-        def error(self, msg):
-            self.log_with_caller_info('error', msg)
+            def error(self, msg):
+                self.log_with_caller_info('error', msg)
 
-        def teelog(self, msg, level):
-            if not self.suppressPrintout:
-                printWithColor(msg, level)
-            self.log_with_caller_info(level, msg)
+            def teelog(self, msg, level):
+                if not self.suppressPrintout:
+                    printWithColor(msg, level)
+                self.log_with_caller_info(level, msg)
 
-
-        def log(self, msg, level):
-            self.log_with_caller_info(level, msg)
+            def log(self, msg, level):
+                self.log_with_caller_info(level, msg)
 
 # ------------------------------
 def format_bytes(size, use_1024_bytes=True):
@@ -130,7 +131,7 @@ def almost_urandom(n):
     
 def create_file(file_name, file_content,file_size,quiet=False,tl=None):
     if not tl:
-        tl = teeLogger(suppressPrintout=quiet)
+        tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
     try:
         with open(file_name, "wb", buffering=0) as f:
             try:
@@ -159,7 +160,7 @@ def create_file(file_name, file_content,file_size,quiet=False,tl=None):
 
 def move_file(src, dst,tl=None):
     if not tl:
-        tl = teeLogger()
+        tl = Tee_Logger.teeLogger()
     start_move_time = time.perf_counter()
     try:
         os.rename(src, dst)
@@ -173,7 +174,7 @@ def move_file(src, dst,tl=None):
 
 def read_file(file_name,file_content, file_size,zeros,quiet=False,tl=None):
     if not tl:
-        tl = teeLogger(suppressPrintout=quiet)
+        tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
     b=bytearray(file_size)
     # check if file exists and size is correct
     try:
@@ -210,7 +211,7 @@ def read_file(file_name,file_content, file_size,zeros,quiet=False,tl=None):
 
 def index_file(file_name,zeros,quiet=False,tl=None):
     if not tl:
-        tl = teeLogger(suppressPrintout=quiet)
+        tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
     try:
         # index creates file_name.index folder, stat it, then delete it
         # create the index folder
@@ -232,7 +233,7 @@ def index_file(file_name,zeros,quiet=False,tl=None):
     
 def stat_file(file_name,tl=None):
     if not tl:
-        tl = teeLogger()
+        tl = Tee_Logger.teeLogger()
     start_stat_time = time.perf_counter()
     try:
         size = os.stat(file_name).st_size
@@ -255,7 +256,7 @@ def int_to_color(n, brightness_threshold=500):
 
 def worker(file_count, file_size, directory, results, mode, counter,quiet,zeros,thread_start_time,tl=None):
     if not tl:
-        tl = teeLogger(suppressPrintout=quiet)
+        tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
     local_results = []
     r, g, b = int_to_color(os.getpid())
     if not quiet:
@@ -400,7 +401,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
         quiet = True
         no_report = True
     if not tl:
-        tl = teeLogger(suppressPrintout=quiet)
+        tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
     os.makedirs(directory, exist_ok=True)
     processes = []
     file_size = int(file_size)
@@ -574,7 +575,7 @@ def climain():
     parser.add_argument("-z","--zeros", action="store_true", help="Use zeros instead of random numbers. Use this if you are sure no write compression is available. Potentially higher write accuracy.",default=False)
     parser.add_argument('-addr',"--message_end_point_address", type=str, help="The end point address of the message")
     parser.add_argument('--threshold_to_report_anomaly', type=int, help="The threshold to report if 1 percent high is higher then 1 percent low * <threshold_to_report_anomaly>",default=0)
-    parser.add_argument("-V","--version", action="version", version=f"%(prog)s {version} with teeLogger {teeLogger().version} by pan@zopyr.us")
+    parser.add_argument("-V","--version", action="version", version=f"%(prog)s {version} with teeLogger {Tee_Logger.version} by pan@zopyr.us")
     args = parser.parse_args()
 
     # if we are on windows, set the log directory to the current directory
@@ -588,8 +589,8 @@ def climain():
         args.no_report = True
     if args.no_log:
         args.log_directory = '/dev/null'
-    #tl = teeLogger(args.log_directory,'iotest',2,10)
-    tl = teeLogger(systemLogFileDir=args.log_directory,programName='iotest',compressLogAfterMonths=1,deleteLogAfterYears=3,suppressPrintout=args.stealth,noLog=args.no_log)
+    #tl = Tee_Logger.teeLogger(args.log_directory,'iotest',2,10)
+    tl = Tee_Logger.teeLogger(systemLogFileDir=args.log_directory,programName='iotest',compressLogAfterMonths=1,deleteLogAfterYears=3,suppressPrintout=args.stealth,noLog=args.no_log)
     
     tl.info(f'Arguments: {vars(args)}')
 
