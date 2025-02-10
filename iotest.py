@@ -8,7 +8,7 @@ import datetime
 import subprocess
 import json
 
-version = '3.53'
+version = '3.54'
 
 # --------------------------------
 # TeeLogger Inline print only

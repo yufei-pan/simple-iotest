@@ -1,11 +1,12 @@
 [project]
 name = "simple-iotest"
-version = "3.53"
+version = "3.54"
 description = "A dead simple iotest for HPC environments"
 readme = "README.md"
 requires-python = ">=3.6"
 dependencies = [
     "argparse",
+    "tee-logger>=6.22",
 ]
 authors = [
     { name = "Yufei Pan", email = "pan@zopyr.us" }
