@@ -14,7 +14,7 @@ except:
     def profile(func):
         return func
 
-version = '3.58'
+version = '3.59'
 
 # --------------------------------
 # TeeLogger Inline print only
@@ -414,22 +414,35 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
     outResults = dict()
     totalTime = {}
     estimatedTotalMemory = file_size * process_count * 1.2
-    totalFreeMemory = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_AVPHYS_PAGES')
-    nonSwapMemory = os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+    phyFreeMemory = -1
+    swapMemory = -1
+    if os.path.exists('/proc/meminfo'):
+        try:
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    if 'MemAvailable' in line:
+                        phyFreeMemory = int(line.split()[1]) * 1024
+                    if 'SwapFree' in line:
+                        swapMemory = int(line.split()[1]) * 1024
+        except:
+            tl.teeerror(f"Failed to read /proc/meminfo")
     # warn if the estimated total memory is more than 90% of the total free memory
-    if estimatedTotalMemory > totalFreeMemory:
-        tl.teeerror(f"Estimated total memory usage is more than the available free memory.")
-        tl.teeerror(f"Total free memory: {format_bytes(totalFreeMemory)}B")
+    if phyFreeMemory + swapMemory > 0 and estimatedTotalMemory > phyFreeMemory + swapMemory:
+        tl.teeerror(f"Estimated total memory usage is more than the all available memory to use.")
+        tl.teeerror(f"Physical available memory: {format_bytes(phyFreeMemory)}B")
+        tl.teeerror(f"Swap available memory: {format_bytes(swapMemory)}B")
         tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
-        process_count = int(totalFreeMemory // file_size // 1.2)
+        process_count = int(phyFreeMemory + swapMemory // file_size // 1.2)
         tl.teeerror(f"Reducing the number of processes to {process_count}")
-    if estimatedTotalMemory > nonSwapMemory * 0.9:
-        tl.teeerror(f"Estimated total memory usage is more than 90% of the total non swap free memory.")
+    if phyFreeMemory > 0 and estimatedTotalMemory > phyFreeMemory * 0.9:
+        tl.teeerror(f"Estimated total memory usage is more than 90% of the total non swap available memory.")
         tl.teeerror(f"You may want to reduce the file size or the number of processes.")
-        tl.teeerror(f"Total free memory: {format_bytes(totalFreeMemory)}B")
+        tl.teeerror(f"Available memory: {format_bytes(phyFreeMemory)}B")
         tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
-        tl.teeerror(f"Exit now (press Ctrl+C) or iotest will continue anyway in 10 seconds...")
-        time.sleep(10)
+        tl.teelog(f"If continuing, iotest will likely put very heavy pressure on swap memory and may lead to system crash.",level='critical')
+        tl.teelog(f"Exit now (press Ctrl+C) or iotest will continue anyway in 15 seconds...",level='critical')
+        time.sleep(16)
+        tl.teelog(f"Warning! Continuing anyway... ",level='warning')
     with Manager() as manager:
         # bench mark file generation performance first
         results = manager.list()
