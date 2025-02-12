@@ -8,7 +8,7 @@ import datetime
 import subprocess
 import json
 
-version = '3.55'
+version = '3.56'
 
 # --------------------------------
 # TeeLogger Inline print only
@@ -430,6 +430,8 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
         tl.teeprint(f"Gen time calculated:   \t{genTimeCalc:.4f} s")
         tl.teeprint(f"Process start delay:   \t{processStartDelay:.4f} s")
         for mode in modes:
+            if mode == 'benchmark':
+                continue
             processes = []
             results = manager.list()
             thread_start_time = time.perf_counter() + processStartDelay
@@ -474,7 +476,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 
 
     # write the outResults to a csv file
-    if not no_report:
+    if not no_report and outResults:
         dir_str_repr = directory.replace('/','-').replace('\\','-').replace(':','-').replace('--','-').replace(' ','_')
         csv_file_name = os.path.join(directory, f"iotest_{'-'.join(modes)}_{dir_str_repr}_fs={file_size}_fc={file_count}_pc={process_count}_{tl.currentDateTime}.csv")
         with open(csv_file_name, "w") as f:
@@ -545,7 +547,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
     tl.teeprint('\n'.join(report))
 
     # write the report to a file
-    if not no_report:
+    if not no_report and outResults:
         report_file_name = os.path.join(directory, f"iotest_{'-'.join(modes)}_{dir_str_repr}_fs={file_size}_fc={file_count}_pc={process_count}_{tl.currentDateTime}_report.txt")
         with open(report_file_name, "w") as f:
             f.write('\n'.join(report))
@@ -566,7 +568,7 @@ def climain():
  WRITE: batched all thread write.
  READ: batched all thread read.
  INDEX: creates --file_count amount of index folders, stat it, then delete it.
- RWI: Execute Write - Index - Read mode sequentially in batch mode.""",choices=['comprehensive','read', 'write','random','index','r','w','rw','wr','i','rwi','wri','c'], default="c")
+ RWI: Execute Write - Index - Read mode sequentially in batch mode.""",choices=['comprehensive','read', 'write','random','index','benchmark','r','w','rw','wr','i','rwi','wri','c','b'], default="c")
     parser.add_argument("-q","--quiet", action="store_true", help="Suppress output, default True in new version",default=True)
     parser.add_argument("-v","--verbose", action="store_true", help="Verbose output",default=False)
     parser.add_argument("-S",'--stealth', action="store_true", help="Suppress verbose output and verbose log file",default=False)
@@ -611,6 +613,8 @@ def climain():
             modes.append('index')
         elif mode == 'c':
             modes.append('comprehensive')
+        elif mode == 'b':
+            modes.append('benchmark')
     
         if 'write' in mode:
             modes.append('write')
@@ -622,6 +626,8 @@ def climain():
             modes.append('index')
         if 'comprehensive' in mode:
             modes.append('comprehensive')
+        if 'benchmark' in mode:
+            modes.append('benchmark')
 
     args.file_size = args.file_size.lower()
     if 'm' in args.file_size.lower():
@@ -647,13 +653,15 @@ def climain():
         tl.info(f'File size: {format_bytes(args.file_size)}B')
         tl.info(f'Number of files: {args.file_count}')
         tl.info(f'Number of processes: {args.process_count}')
-        tl.info(f'Writing to {args.directory}')
+        if not 'benchmark' in modes and len(modes) == 1:
+            tl.info(f'Writing to {args.directory}')
     else:
         tl.teeprint(f'Running in {modes} modes...')
         tl.teeprint(f'File size: {format_bytes(args.file_size)}B')
         tl.teeprint(f'Number of files: {args.file_count}')
         tl.teeprint(f'Number of processes: {args.process_count}')
-        tl.teeprint(f'Writing to {args.directory}')
+        if not 'benchmark' in modes and len(modes) == 1:
+            tl.teeprint(f'Writing to {args.directory}')
     main(args.file_size, args.file_count, args.process_count, args.directory,modes,args.quiet,args.zeros,tl=tl,stealth=args.stealth,message_end_point_address=args.message_end_point_address,no_report=args.no_report,threshold_to_report_anomaly=args.threshold_to_report_anomaly)
                 
 if __name__ == "__main__":
