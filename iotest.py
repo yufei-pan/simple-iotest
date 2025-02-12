@@ -14,7 +14,7 @@ except:
     def profile(func):
         return func
 
-version = '3.59.1'
+version = '3.59.2'
 
 # --------------------------------
 # TeeLogger Inline print only
@@ -434,6 +434,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
         tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
         process_count = int((phyFreeMemory + swapMemory ) // file_size // 1.2)
         tl.teeerror(f"Reducing the number of processes to {process_count}")
+    estimatedTotalMemory = file_size * process_count * 1.2
     if phyFreeMemory > 0 and estimatedTotalMemory > phyFreeMemory * 0.9:
         tl.teeerror(f"Estimated total memory usage is more than 90% of the total non swap available memory.")
         tl.teeerror(f"You may want to reduce the file size or the number of processes.")
