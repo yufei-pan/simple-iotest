@@ -14,7 +14,8 @@ except:
     def profile(func):
         return func
 
-version = '3.59.2'
+version = '3.59.3'
+__version__ = version
 
 # --------------------------------
 # TeeLogger Inline print only
