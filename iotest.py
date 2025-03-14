@@ -14,7 +14,7 @@ except:
     def profile(func):
         return func
 
-version = '3.59.3'
+version = '3.59.4'
 __version__ = version
 
 # --------------------------------
@@ -120,7 +120,6 @@ def format_bytes(size, use_1024_bytes=True):
         while size > power:
             size /= power
             n += 1
-        return f"{size:.2f} {power_labels[n]}"
     else:
         power = 10**3
         n = 0
@@ -128,7 +127,7 @@ def format_bytes(size, use_1024_bytes=True):
         while size > power:
             size /= power
             n += 1
-        return f"{size:.2f} {power_labels[n]}"
+    return f"{size:.2f} {power_labels[n]}"
 
 def almost_urandom(n):
     try:
@@ -146,7 +145,6 @@ def create_file(file_name, file_content,file_size,quiet=False,tl=None):
                     os.posix_fadvise(f.fileno(), 0, file_size, os.POSIX_FADV_DONTNEED)
             except:
                 tl.teelog(f'Failed to posix_fadvise, trying fallocate',level='warning')
-                pass
             start_write_time = time.perf_counter()
             try:
                 if os.name == 'posix':
@@ -179,7 +177,7 @@ def move_file(src, dst,tl=None):
         tl.teeerror(traceback.format_exc())
         return 0,time.perf_counter()
 
-def read_file(file_name,file_content, file_size,zeros,quiet=False,tl=None):
+def read_file(file_name,file_content, file_size,quiet=False,tl=None):
     if not tl:
         tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
     b=bytearray(file_size)
@@ -197,7 +195,6 @@ def read_file(file_name,file_content, file_size,zeros,quiet=False,tl=None):
                     os.posix_fadvise(f.fileno(), 0, file_size, os.POSIX_FADV_DONTNEED)
             except:
                 tl.teelog(f'Failed to posix_fadvise, trying fallocate',level='warning')
-                pass
             start_read_time = time.perf_counter()
             try:
                 if os.name == 'posix':
@@ -216,7 +213,7 @@ def read_file(file_name,file_content, file_size,zeros,quiet=False,tl=None):
         return 0,time.perf_counter()
     
 
-def index_file(file_name,zeros,quiet=False,tl=None):
+def index_file(file_name,quiet=False,tl=None):
     if not tl:
         tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
     try:
@@ -284,8 +281,7 @@ def worker(file_count, file_size, directory, results, mode, counter,quiet,zeros,
     reportInterval = max(file_count // 10,1)
     for i in range(file_count):
         # print a digit every 10% of the files
-        if i % reportInterval == 0:
-            if quiet:
+        if i % reportInterval == 0 and quiet:
                 print(f'\r{i//reportInterval}',end='',flush=True)
         i = str(i+1).zfill(len(str(file_count)))
         file_name = os.path.join(directory,str(counter), f"temp_{i}.bin")
@@ -300,7 +296,7 @@ def worker(file_count, file_size, directory, results, mode, counter,quiet,zeros,
 
         elif mode == 'read':
             
-            start_read_time,end_read_time = read_file(file_name, file_content, file_size,zeros,quiet,tl=tl)
+            start_read_time,end_read_time = read_file(file_name, file_content, file_size,quiet,tl=tl)
 
             local_results.append(end_read_time- start_read_time)
             if not quiet:
@@ -350,7 +346,7 @@ def worker(file_count, file_size, directory, results, mode, counter,quiet,zeros,
 
             # then we read the file
 
-            start_read_time,end_read_time = read_file(file_name + ".moved",file_content, file_size,zeros,quiet,tl=tl)
+            start_read_time,end_read_time = read_file(file_name + ".moved",file_content, file_size,quiet,tl=tl)
 
             resultList.append(end_read_time- start_read_time)
 
@@ -360,7 +356,7 @@ def worker(file_count, file_size, directory, results, mode, counter,quiet,zeros,
             local_results.append(resultList)
         elif mode == 'index':
             # This will test the indexing performance of the filesystem
-            start_index_time,end_index_time = index_file(file_name, zeros,quiet,tl=tl)
+            start_index_time,end_index_time = index_file(file_name, quiet,tl=tl)
             local_results.append(end_index_time- start_index_time)
             if not quiet:
                 tl.teeprint(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tIndexed\tin {end_index_time-start_index_time} s"+ '\033[0m')
@@ -392,9 +388,9 @@ def benchmarkGenSpeed(file_size, file_count,zeros,results):
     start_time = time.perf_counter()
     for i in range(file_count):
         if zeros:
-            file_content = b'\x00' * file_size
+            _ = b'\x00' * file_size
         else:
-            file_content = almost_urandom(file_size) 
+            _ = almost_urandom(file_size) 
         if time.perf_counter() - start_time > 5:
             break
     genTime = time.perf_counter() - start_time
@@ -690,14 +686,14 @@ def climain():
         tl.info(f'File size: {format_bytes(args.file_size)}B')
         tl.info(f'Number of files: {args.file_count}')
         tl.info(f'Number of processes: {args.process_count}')
-        if not 'benchmark' in modes and len(modes) == 1:
+        if 'benchmark' not in modes and len(modes) == 1:
             tl.info(f'Writing to {args.directory}')
     else:
         tl.teeprint(f'Running in {modes} modes...')
         tl.teeprint(f'File size: {format_bytes(args.file_size)}B')
         tl.teeprint(f'Number of files: {args.file_count}')
         tl.teeprint(f'Number of processes: {args.process_count}')
-        if not 'benchmark' in modes and len(modes) == 1:
+        if 'benchmark' not in modes and len(modes) == 1:
             tl.teeprint(f'Writing to {args.directory}')
     main(args.file_size, args.file_count, args.process_count, args.directory,modes,args.quiet,args.zeros,tl=tl,stealth=args.stealth,message_end_point_address=args.message_end_point_address,no_report=args.no_report,threshold_to_report_anomaly=args.threshold_to_report_anomaly)
                 
