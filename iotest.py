@@ -7,6 +7,7 @@ from multiprocessing import Process, Manager
 import datetime
 import subprocess
 import json
+import re
 
 try:
     from memory_profiler import profile
