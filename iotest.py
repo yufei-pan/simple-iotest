@@ -14,7 +14,7 @@ except:
     def profile(func):
         return func
 
-version = '3.59.5'
+version = '3.59.6'
 __version__ = version
 
 # --------------------------------
@@ -57,7 +57,11 @@ except:
     class Tee_Logger:
         version = '0.1 inline'
         class teeLogger:
-            def __init__(self, systemLogFileDir='.', programName='iotest', compressLogAfterMonths=2, deleteLogAfterYears=2, suppressPrintout=False, fileDescriptorLength=15,noLog=True):
+            def __init__(self, systemLogFileDir='.', programName=None, compressLogAfterMonths=2, 
+                 deleteLogAfterYears=2, suppressPrintout=..., fileDescriptorLength=15,
+                 noLog=False,callerStackDepth=-2,disable_colors=False, encoding = None,
+                 in_place_compression = None, collapse_single_day_logs = ...,compression_level=...,
+                 binary_mode = True):
                 self.name = programName
                 self.currentDateTime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                 self.noLog = True
@@ -709,7 +713,7 @@ def climain():
     if args.no_log:
         args.log_directory = '/dev/null'
     #tl = Tee_Logger.teeLogger(args.log_directory,'iotest',2,10)
-    tl = Tee_Logger.teeLogger(systemLogFileDir=args.log_directory,programName='iotest',compressLogAfterMonths=1,deleteLogAfterYears=3,suppressPrintout=args.stealth,noLog=args.no_log)
+    tl = Tee_Logger.teeLogger(systemLogFileDir=args.log_directory,programName='iotest',compressLogAfterMonths=1,deleteLogAfterYears=3,suppressPrintout=args.stealth,noLog=args.no_log,in_place_compression=True)
     
     tl.info(f'Arguments: {vars(args)}')
 
