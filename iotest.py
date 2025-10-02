@@ -14,8 +14,15 @@ try:
 except:
     def profile(func):
         return func
+    
+numpy_available = False
+try:
+    from numpy.random import Generator, SFC64
+    numpy_available = True
+except:
+    numpy_available = False
 
-version = '3.59.6'
+version = '3.60.0'
 __version__ = version
 
 # --------------------------------
@@ -54,6 +61,7 @@ def printWithColor(msg, level = 'info'):
         print(bcolors.info + msg + bcolors.ENDC)
 try:
     import Tee_Logger
+    assert float(Tee_Logger.version) >= 6.34
 except:
     class Tee_Logger:
         version = '0.1 inline'
@@ -220,7 +228,13 @@ def format_bytes(size, use_1024_bytes=None, to_int=False, to_str=False,str_forma
 
 def almost_urandom(n):
     try:
-        return random.getrandbits(8 * n).to_bytes(n, 'big')
+        if numpy_available:
+            rng_sf = Generator(SFC64())
+            n_u64 = (n + 7) // 8
+            u64 = rng_sf.bit_generator.random_raw(n_u64)
+            return u64.view('uint8')[:n].tobytes()
+        else:
+            return random.getrandbits(8 * n).to_bytes(n, 'big')
     except OverflowError:
         return almost_urandom(n // 2) + almost_urandom(n - n // 2)
     
@@ -473,21 +487,23 @@ def addToDicWithoutOverwrite(dic,key,value):
     else:
         dic[key] = value
 
-def benchmarkGenSpeed(file_size, file_count,zeros,results):
+def benchmarkGenSpeed(file_size, file_count,zeros,results,timeout=5):
     start_time = time.perf_counter()
-    for i in range(file_count):
+    c = 0
+    while True:
         if zeros:
             _ = b'\x00' * file_size
         else:
             _ = almost_urandom(file_size) 
-        if time.perf_counter() - start_time > 5:
+        c += 1
+        if (file_count > 0 and c >= file_count) or time.perf_counter() - start_time > timeout:
             break
     genTime = time.perf_counter() - start_time
-    genSize = file_size * (i+1)
+    genSize = file_size * c
     genSpeed = genSize / genTime 
     results.append(genSpeed)
 
-def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0):
+def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5):
     if stealth:
         quiet = True
         no_report = True
@@ -502,6 +518,8 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
     estimatedTotalMemory = file_size * process_count * 1.2
     phyFreeMemory = -1
     swapMemory = -1
+    if modes == ['benchmark']:
+        file_count = 0
     if os.path.exists('/proc/meminfo'):
         try:
             with open('/proc/meminfo') as f:
@@ -533,9 +551,15 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
     with Manager() as manager:
         # bench mark file generation performance first
         results = manager.list()
-        tl.teeprint(f"Benchmarking file generation performance... with {format_bytes(file_size)}B {'zero' if zeros else 'random'} files")
+        if zeros:
+            generator = 'zeros'
+        elif numpy_available:
+            generator = 'numpy SFC64'
+        else:
+            generator = 'random.getrandbits'
+        tl.teeprint(f"Benchmarking file generation performance... using {process_count}x {generator} with {format_bytes(file_size)}B files * {file_count if file_count else '∞'} for {benchmarkTime}s")
         for counter in range(process_count):
-            p = Process(target=benchmarkGenSpeed, args=(file_size, file_count,zeros,results))
+            p = Process(target=benchmarkGenSpeed, args=(file_size, file_count,zeros,results,benchmarkTime))
             processes.append(p)
         genStartTime = time.perf_counter()
         for p in processes:
@@ -699,7 +723,8 @@ def climain():
     parser.add_argument("-z","--zeros", action="store_true", help="Use zeros instead of random numbers. Use this if you are sure no write compression is available. Potentially higher write accuracy.",default=False)
     parser.add_argument('-addr',"--message_end_point_address", type=str, help="The end point address of the message")
     parser.add_argument('--threshold_to_report_anomaly', type=int, help="The threshold to report if 1 percent high is higher then 1 percent low * <threshold_to_report_anomaly>",default=0)
-    parser.add_argument("-V","--version", action="version", version=f"%(prog)s {version} with teeLogger {Tee_Logger.version} by pan@zopyr.us")
+    parser.add_argument('-bt',"--benchmark_time", type=int, help="The time in seconds to run the benchmark for file generation speed",default=5)
+    parser.add_argument("-V","--version", action="version", version=f"%(prog)s {version} with teeLogger {Tee_Logger.version} {' and numpy ' if numpy_available else ''} by pan@zopyr.us")
     args = parser.parse_args()
 
     # if we are on windows, set the log directory to the current directory
@@ -784,7 +809,7 @@ def climain():
         tl.teeprint(f'Number of processes: {args.process_count}')
         if 'benchmark' not in modes and len(modes) == 1:
             tl.teeprint(f'Writing to {args.directory}')
-    main(args.file_size, args.file_count, args.process_count, args.directory,modes,args.quiet,args.zeros,tl=tl,stealth=args.stealth,message_end_point_address=args.message_end_point_address,no_report=args.no_report,threshold_to_report_anomaly=args.threshold_to_report_anomaly)
+    main(args.file_size, args.file_count, args.process_count, args.directory,modes,args.quiet,args.zeros,tl=tl,stealth=args.stealth,message_end_point_address=args.message_end_point_address,no_report=args.no_report,threshold_to_report_anomaly=args.threshold_to_report_anomaly,benchmarkTime=args.benchmark_time)
                 
 if __name__ == "__main__":
     climain()
