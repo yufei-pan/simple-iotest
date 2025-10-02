@@ -12,13 +12,11 @@ authors = [
     { name = "Yufei Pan", email = "pan@zopyr.us" }
 ]
 classifiers = [
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3",
     "Operating System :: POSIX :: Linux",
 	"Operating System :: MacOS :: MacOS X",
 	"Operating System :: Microsoft :: Windows",
 ]
-license = {text = "GPL-3.0-or-later"}
 
 [project.scripts]
 iotest = "iotest:climain"
