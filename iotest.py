@@ -9,11 +9,6 @@ import subprocess
 import json
 import re
 
-try:
-    from memory_profiler import profile
-except:
-    def profile(func):
-        return func
     
 numpy_available = False
 try:
@@ -22,7 +17,7 @@ try:
 except:
     numpy_available = False
 
-version = '3.60.0'
+version = '3.61.0'
 __version__ = version
 
 # --------------------------------
@@ -666,18 +661,18 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
             total_size = file_size * file_count * process_count
             total_p_time = sum(outResults[mode]) / process_count
             total_bandwidth = total_size / total_p_time
-            report.append(f"Total {mode} size:     \t{format_bytes(total_size)}B")
-            report.append(f"Total {mode} speed:    \t{format_bytes(total_bandwidth)}B/s")
+            report.append(f"Total {mode} size:      \t{format_bytes(total_size)}B")
+            report.append(f"{mode} bandwidth (call):\t{format_bytes(total_bandwidth)}B/s")
             report.append(f"                       \t{format_bytes(total_bandwidth * 8,use_1024_bytes=False)}b/s")
-            report.append(f"With generation time:  \t{format_bytes(total_size / totalTime[mode])}B/s")
+            report.append(f"{mode} bandwidth (sync):\t{format_bytes(total_size / totalTime[mode])}B/s")
             report.append(f"                       \t{format_bytes(total_size / totalTime[mode] * 8,use_1024_bytes=False)}b/s")
-            report.append(f"IO time %:             \t{total_p_time / totalTime[mode] * 100:.2f}%")
-        report.append(f"Average {mode} time:   \t{avg_time:.4f} s")
-        report.append(f"Median {mode} time:    \t{median_time:.4f} s")
-        report.append(f"1 % low {mode} time:   \t{one_percent_low_time:.4f} s")
-        report.append(f"1 % high {mode} time:  \t{one_percent_high_time:.4f} s")
-        report.append(f"0.1 % high {mode} time:\t{zero_point_one_percent_high_time:.4f} s")
-        report.append(f"Highest {mode} time:   \t{highest_time:.4f} s")
+            report.append(f"IO time % (IO wait):   \t{total_p_time / totalTime[mode] * 100:.2f}%")
+        report.append(f"Average {mode} time:    \t{avg_time:.4f} s")
+        report.append(f"Median {mode} time:     \t{median_time:.4f} s")
+        report.append(f"1 % low {mode} time:    \t{one_percent_low_time:.4f} s")
+        report.append(f"1 % high {mode} time:   \t{one_percent_high_time:.4f} s")
+        report.append(f"0.1 % high {mode} time: \t{zero_point_one_percent_high_time:.4f} s")
+        report.append(f"Highest {mode} time:    \t{highest_time:.4f} s")
         report.append(f"-"*80)
         if threshold_to_report_anomaly and threshold_to_report_anomaly > 0 and one_percent_high_time > (one_percent_low_time * threshold_to_report_anomaly):
             report.append(f"Warning | iotest: 1% high is too high compared to 1% low!")
@@ -710,11 +705,11 @@ def climain():
     parser.add_argument('-d',"--directory", type=str, help="Directory to put the files in (default:<pwd>)", default=os.getcwd())
     parser.add_argument('-ld',"--log_directory", type=str, help="Directory to put the log files in (default:/var/log/)", default='/var/log/')
     parser.add_argument("mode", nargs='*', type=str, help="""The mode the script will operate in (default:comprehensive).
- COMPREHENSIVE: async fully cached per thread write - index - read operation.
+ COMPREHENSIVE: async fully cached per thread write - index - read operation (what your code see).
  WRITE: batched all thread write.
  READ: batched all thread read.
  INDEX: creates --file_count amount of index folders, stat it, then delete it.
- RWI: Execute Write - Index - Read mode sequentially in batch mode.""",choices=['comprehensive','read', 'write','random','index','benchmark','r','w','rw','wr','i','rwi','wri','c','b'], default="c")
+ RWI: Execute Write - Index - Read mode sequentially in batch mode.""",choices=['read', 'write','random','index','benchmark','comprehensive','r','w','rw','wr','i','rwi','wri','c','b'], default="w")
     parser.add_argument("-q","--quiet", action="store_true", help="Suppress output, default True in new version",default=True)
     parser.add_argument("-v","--verbose", action="store_true", help="Verbose output",default=False)
     parser.add_argument("-S",'--stealth', action="store_true", help="Suppress verbose output and verbose log file",default=False)
