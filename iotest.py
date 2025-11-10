@@ -16,7 +16,7 @@ try:
 except ImportError:
 	numpy_available = False
 
-version = '3.61.0'
+version = '3.61.1'
 __version__ = version
 
 # --------------------------------
@@ -617,9 +617,9 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			total_bandwidth = total_size / total_p_time
 			report.append(f"Total {mode} size:      \t{format_bytes(total_size)}B")
 			report.append(f"{mode} bandwidth (call):\t{format_bytes(total_bandwidth)}B/s")
-			report.append(f"                       \t{format_bytes(total_bandwidth * 8,use_1024_bytes=False)}b/s")
+			report.append(f"                       \t{format_bytes(total_bandwidth * 8,use_1024_bytes=False)}bps")
 			report.append(f"{mode} bandwidth (sync):\t{format_bytes(total_size / totalTime[mode])}B/s")
-			report.append(f"                       \t{format_bytes(total_size / totalTime[mode] * 8,use_1024_bytes=False)}b/s")
+			report.append(f"                       \t{format_bytes(total_size / totalTime[mode] * 8,use_1024_bytes=False)}bps")
 			report.append(f"IO time % (IO wait):   \t{total_p_time / totalTime[mode] * 100:.2f}%")
 		report.append(f"Average {mode} time:    \t{avg_time:.4f} s")
 		report.append(f"Median {mode} time:     \t{median_time:.4f} s")
