@@ -16,7 +16,7 @@ try:
 except ImportError:
 	numpy_available = False
 
-version = '3.61.1'
+version = '3.61.2'
 __version__ = version
 
 # --------------------------------
@@ -250,6 +250,7 @@ def create_file(file_name, file_content,file_size,quiet=False,tl=None):
 			except: # noqa: E722
 				tl.teelog('Failed to write using os.writev, trying f.writeinto',level='warning')
 				f.write(file_content)
+				f.flush()
 			os.fsync(f.fileno())
 			end_write_time = time.perf_counter()
 			return start_write_time,end_write_time
