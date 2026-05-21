@@ -16,7 +16,7 @@ try:
 except ImportError:
 	numpy_available = False
 
-version = '3.61.2'
+version = '3.62.0'
 __version__ = version
 
 # --------------------------------
@@ -471,7 +471,17 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 		no_report = True
 	if not tl:
 		tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
-	os.makedirs(directory, exist_ok=True)
+	if isinstance(directory, str):
+		directories = [directory]
+	elif directory is None:
+		directories = [os.getcwd()]
+	else:
+		directories = list(directory)
+	if not directories:
+		raise ValueError("At least one output directory must be provided")
+	for output_dir in directories:
+		os.makedirs(output_dir, exist_ok=True)
+	primary_directory = directories[0]
 	processes = []
 	file_size = int(file_size)
 	outResults = dict()
@@ -543,8 +553,9 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			results = manager.list()
 			thread_start_time = time.perf_counter() + processStartDelay
 			for counter in range(process_count):
+				assigned_directory = directories[counter % len(directories)]
 				counter = str(counter).zfill(len(str(process_count)))
-				p = Process(target=worker, args=(file_count, file_size, directory, results, mode, counter,quiet,zeros,thread_start_time,tl))
+				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter,quiet,zeros,thread_start_time,tl))
 				processes.append(p)
 			totalStartTime = thread_start_time
 			for p in processes:
@@ -576,8 +587,8 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 				addToDicWithoutOverwrite(totalTime,mode,totalEndTime)
 	# write the outResults to a csv file
 	if not no_report and outResults:
-		dir_str_repr = directory.replace('/','-').replace('\\','-').replace(':','-').replace('--','-').replace(' ','_')
-		csv_file_name = os.path.join(directory, f"iotest_{'-'.join(modes)}_{dir_str_repr}_fs={file_size}_fc={file_count}_pc={process_count}_{tl.currentDateTime}.csv")
+		dir_str_repr = "_".join([d.replace('/','-').replace('\\','-').replace(':','-').replace('--','-').replace(' ','_') for d in directories])
+		csv_file_name = os.path.join(primary_directory, f"iotest_{'-'.join(modes)}_{dir_str_repr}_fs={file_size}_fc={file_count}_pc={process_count}_{tl.currentDateTime}.csv")
 		with open(csv_file_name, "w") as f:
 			# the headers are just the keys in the dic, 
 			# the values are the list of results
@@ -639,7 +650,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 	tl.teeprint('\n'.join(report))
 	# write the report to a file
 	if not no_report and outResults:
-		report_file_name = os.path.join(directory, f"iotest_{'-'.join(modes)}_{dir_str_repr}_fs={file_size}_fc={file_count}_pc={process_count}_{tl.currentDateTime}_report.txt")
+		report_file_name = os.path.join(primary_directory, f"iotest_{'-'.join(modes)}_{dir_str_repr}_fs={file_size}_fc={file_count}_pc={process_count}_{tl.currentDateTime}_report.txt")
 		with open(report_file_name, "w") as f:
 			f.write('\n'.join(report))
 		tl.teeprint(f"Report written to {report_file_name}")
@@ -647,11 +658,32 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 	return outResults
 
 def climain():
+	default_file_size_str = '30'
+	default_file_count = 50
+	default_process_count = 36
+
+	def parse_size_arg(size_arg, unitless_as_mb=True):
+		size_arg = str(size_arg).strip().lower()
+		if 'm' in size_arg:
+			return int(float(size_arg.partition('m')[0]) * 1024 * 1024)
+		if 'g' in size_arg:
+			return int(float(size_arg.partition('g')[0]) * 1024 * 1024 * 1024)
+		if 'k' in size_arg:
+			return int(float(size_arg.partition('k')[0]) * 1024)
+		if 't' in size_arg:
+			return int(float(size_arg.partition('t')[0]) * 1024 * 1024 * 1024 * 1024)
+		if 'b' in size_arg and size_arg.partition('b')[0].replace('.', '', 1).isdigit():
+			return int(float(size_arg.partition('b')[0]))
+		if unitless_as_mb:
+			return int(float(size_arg) * 1024 * 1024)
+		return int(float(size_arg))
+
 	parser = argparse.ArgumentParser(description="Test total disk bandwidth. Default to comprehensive mode: write -> move -> stat -> read")
-	parser.add_argument("-fs","--file_size", type=str, help="File size (default:30),  defaults to mb, can specify in t(b),g(b),m(b),k(b),b", default='30')
-	parser.add_argument("-fc","--file_count", type=int, help="Number of files to create and read per process (default:50)",default=50)
-	parser.add_argument("-t",'-pc',"--process_count", type=int, help="Number of processes to run concurrently (default:27)", default=36)
-	parser.add_argument('-d',"--directory", type=str, help="Directory to put the files in (default:<pwd>)", default=os.getcwd())
+	parser.add_argument("-fs","--file_size", type=str, help="File size (default:30), defaults to mb, can specify in t(b),g(b),m(b),k(b),b", default=None)
+	parser.add_argument("-fc","--file_count", type=int, help="Number of files to create and read per process (default:50)",default=None)
+	parser.add_argument("-t",'-pc',"--process_count", type=int, help="Number of processes to run concurrently (default:36)", default=None)
+	parser.add_argument("-ts","--total_size", type=str, help="Total size target. If -fs/-fc/-pc is omitted, auto-calculate one missing arg to fit this total size.")
+	parser.add_argument('-d',"--directory", action='append', type=str, help="Directory to put the files in. Repeat -d to round-robin workers across directories (default:<pwd>)", default=None)
 	parser.add_argument('-ld',"--log_directory", type=str, help="Directory to put the log files in (default:/var/log/)", default='/var/log/')
 	parser.add_argument("mode", nargs='*', type=str, help="""The mode the script will operate in (default:comprehensive).
  COMPREHENSIVE: async fully cached per thread write - index - read operation (what your code see).
@@ -683,6 +715,40 @@ def climain():
 	#tl = Tee_Logger.teeLogger(args.log_directory,'iotest',2,10)
 	tl = Tee_Logger.teeLogger(systemLogFileDir=args.log_directory,programName='iotest',compressLogAfterMonths=1,deleteLogAfterYears=3,suppressPrintout=args.stealth,noLog=args.no_log,in_place_compression=True)
 	tl.info(f'Arguments: {vars(args)}')
+	file_size_specified = args.file_size is not None
+	file_count_specified = args.file_count is not None
+	process_count_specified = args.process_count is not None
+
+	args.file_size = parse_size_arg(args.file_size if file_size_specified else default_file_size_str, unitless_as_mb=True)
+	args.file_count = args.file_count if file_count_specified else default_file_count
+	args.process_count = args.process_count if process_count_specified else default_process_count
+
+	if args.total_size is not None:
+		total_size = parse_size_arg(args.total_size, unitless_as_mb=True)
+		if total_size <= 0:
+			raise ValueError("total_size must be greater than 0")
+		if file_size_specified and file_count_specified and process_count_specified:
+			tl.teelog("Warning | iotest: -ts/--total_size is ignored because -fs, -fc, and -pc/-t are all explicitly set.", level='warning')
+		else:
+			if not file_count_specified:
+				denominator = args.file_size * args.process_count
+				if denominator <= 0:
+					raise ValueError("Cannot calculate file_count because file_size * process_count is invalid")
+				args.file_count = max(total_size // denominator, 1)
+				tl.teelog(f"Adjusted -fc to {args.file_count} to fit total_size {format_bytes(total_size)}B", level='info')
+			elif not file_size_specified:
+				denominator = args.file_count * args.process_count
+				if denominator <= 0:
+					raise ValueError("Cannot calculate file_size because file_count * process_count is invalid")
+				args.file_size = max(total_size // denominator, 1)
+				tl.teelog(f"Adjusted -fs to {format_bytes(args.file_size)}B to fit total_size {format_bytes(total_size)}B", level='info')
+			elif not process_count_specified:
+				denominator = args.file_size * args.file_count
+				if denominator <= 0:
+					raise ValueError("Cannot calculate process_count because file_size * file_count is invalid")
+				args.process_count = max(total_size // denominator, 1)
+				tl.teelog(f"Adjusted -t/-pc to {args.process_count} to fit total_size {format_bytes(total_size)}B", level='info')
+
 	modes = []
 	for mode in args.mode:
 		if mode == 'r':
@@ -714,36 +780,23 @@ def climain():
 			modes.append('comprehensive')
 		if 'benchmark' in mode:
 			modes.append('benchmark')
-	args.file_size = args.file_size.lower()
-	if 'm' in args.file_size.lower():
-		args.file_size = int(float(args.file_size.partition('m')[0]) * 1024 * 1024)
-	elif 'g' in args.file_size.lower():
-		args.file_size = int(float(args.file_size.partition('g')[0]) * 1024 * 1024 * 1024)
-	elif 'k' in args.file_size.lower():
-		args.file_size = int(float(args.file_size.partition('k')[0]) * 1024)
-	elif 't' in args.file_size.lower():
-		args.file_size = int(float(args.file_size.partition('t')[0]) * 1024 * 1024 * 1024 * 1024)
-	elif 'b' in args.file_size.lower() and args.file_size.lower().partition('b')[0].isdigit():
-		args.file_size = int(float(args.file_size.partition('b')[0]))
-	else:
-		args.file_size = int(float(args.file_size) * 1024 * 1024)
 	# if no directory is provided, use the current directory
 	if args.directory is None:
-		args.directory = os.getcwd()
+		args.directory = [os.getcwd()]
 	if args.stealth:
 		tl.info(f'Running in {modes} modes...')
 		tl.info(f'File size: {format_bytes(args.file_size)}B')
 		tl.info(f'Number of files: {args.file_count}')
 		tl.info(f'Number of processes: {args.process_count}')
 		if 'benchmark' not in modes and len(modes) == 1:
-			tl.info(f'Writing to {args.directory}')
+			tl.info(f'Writing to {", ".join(args.directory)}')
 	else:
 		tl.teeprint(f'Running in {modes} modes...')
 		tl.teeprint(f'File size: {format_bytes(args.file_size)}B')
 		tl.teeprint(f'Number of files: {args.file_count}')
 		tl.teeprint(f'Number of processes: {args.process_count}')
 		if 'benchmark' not in modes and len(modes) == 1:
-			tl.teeprint(f'Writing to {args.directory}')
+			tl.teeprint(f'Writing to {", ".join(args.directory)}')
 	main(args.file_size, args.file_count, args.process_count, args.directory,modes,args.quiet,args.zeros,tl=tl,stealth=args.stealth,message_end_point_address=args.message_end_point_address,no_report=args.no_report,threshold_to_report_anomaly=args.threshold_to_report_anomaly,benchmarkTime=args.benchmark_time)
 	
 if __name__ == "__main__":
