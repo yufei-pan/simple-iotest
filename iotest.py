@@ -16,7 +16,8 @@ try:
 except ImportError:
 	numpy_available = False
 
-version = '3.62.0'
+version = '3.63.0'
+COMMIT_DATE = '2026-06-08'
 __version__ = version
 
 # --------------------------------
@@ -53,6 +54,13 @@ def printWithColor(msg, level = 'info'):
 		print(bcolors.OKCYAN + msg + bcolors.ENDC)
 	else:
 		print(bcolors.info + msg + bcolors.ENDC)
+
+def worker_log(msg, level='info', quiet=False):
+	if quiet:
+		return
+	printWithColor(msg, level)
+
+# ------------------------------
 try:
 	import Tee_Logger # type: ignore
 	assert float(Tee_Logger.version) >= 6.34
@@ -69,7 +77,7 @@ except Exception:
 				self.currentDateTime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 				self.noLog = True
 				if not noLog:
-					print('Using inline logger, foring noLog...')
+					print('Using inline logger, forcing noLog...')
 				self.systemLogFileDir = '/dev/null'
 				self.logsDir = '/dev/null'
 				self.logFileDir = '/dev/null'
@@ -197,7 +205,7 @@ def format_bytes(size, use_1024_bytes=None, to_int=False, to_str=False,str_forma
 			power = 2**10
 			n = 0
 			power_labels = {0 : '', 1: 'Ki', 2: 'Mi', 3: 'Gi', 4: 'Ti', 5: 'Pi'}
-			while size > power:
+			while size >= power:
 				size /= power
 				n += 1
 			return f"{size:{str_format}}{' '}{power_labels[n]}"
@@ -205,7 +213,7 @@ def format_bytes(size, use_1024_bytes=None, to_int=False, to_str=False,str_forma
 			power = 10**3
 			n = 0
 			power_labels = {0 : '', 1: 'K', 2: 'M', 3: 'G', 4: 'T', 5: 'P'}
-			while size > power:
+			while size >= power:
 				size /= power
 				n += 1
 			return f"{size:{str_format}}{' '}{power_labels[n]}"
@@ -231,16 +239,14 @@ def almost_urandom(n):
 	except OverflowError:
 		return almost_urandom(n // 2) + almost_urandom(n - n // 2)
 	
-def create_file(file_name, file_content,file_size,quiet=False,tl=None):
-	if not tl:
-		tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
+def create_file(file_name, file_content, file_size, quiet=False):
 	try:
 		with open(file_name, "wb", buffering=0) as f:
 			try:
 				if os.name == 'posix':
 					os.posix_fadvise(f.fileno(), 0, file_size, os.POSIX_FADV_DONTNEED)
 			except: # noqa: E722
-				tl.teelog('Failed to posix_fadvise, trying fallocate',level='warning')
+				worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
 			start_write_time = time.perf_counter()
 			try:
 				if os.name == 'posix':
@@ -248,7 +254,7 @@ def create_file(file_name, file_content,file_size,quiet=False,tl=None):
 				else:
 					os.write(f.fileno(), file_content)
 			except: # noqa: E722
-				tl.teelog('Failed to write using os.writev, trying f.writeinto',level='warning')
+				worker_log('Failed to write using os.writev, trying f.write', level='warning', quiet=quiet)
 				f.write(file_content)
 				f.flush()
 			os.fsync(f.fileno())
@@ -256,13 +262,11 @@ def create_file(file_name, file_content,file_size,quiet=False,tl=None):
 			return start_write_time,end_write_time
 	except Exception as e:
 		import traceback
-		tl.teeerror(str(e))
-		tl.teeerror(traceback.format_exc())
+		worker_log(str(e), level='error', quiet=quiet)
+		worker_log(traceback.format_exc(), level='error', quiet=quiet)
 		return 0,time.perf_counter()
 
-def move_file(src, dst,tl=None):
-	if not tl:
-		tl = Tee_Logger.teeLogger()
+def move_file(src, dst, quiet=False):
 	start_move_time = time.perf_counter()
 	try:
 		os.rename(src, dst)
@@ -270,28 +274,25 @@ def move_file(src, dst,tl=None):
 		return start_move_time,end_move_time
 	except Exception as e:
 		import traceback
-		tl.teeerror(str(e))
-		tl.teeerror(traceback.format_exc())
+		worker_log(str(e), level='error', quiet=quiet)
+		worker_log(traceback.format_exc(), level='error', quiet=quiet)
 		return 0,time.perf_counter()
 
-def read_file(file_name,file_content, file_size,quiet=False,tl=None):
-	if not tl:
-		tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
+def read_file(file_name, file_content, file_size, quiet=False):
 	b=bytearray(file_size)
 	# check if file exists and size is correct
 	try:
 		if not os.path.isfile(file_name) or os.path.getsize(file_name) != file_size:
 			# file does not exist or size is wrong, create it
-			if not quiet:
-				tl.teeerror(f"File {file_name} does not exist or size is wrong, creating it...")
-			create_file(file_name, file_content,file_size,tl=tl)
+			worker_log(f"File {file_name} does not exist or size is wrong, creating it...", level='error', quiet=quiet)
+			create_file(file_name, file_content, file_size, quiet=quiet)
 
 		with open(file_name, "rb", buffering=0) as f:
 			try:
 				if os.name == 'posix':
 					os.posix_fadvise(f.fileno(), 0, file_size, os.POSIX_FADV_DONTNEED)
 			except:  # noqa: E722
-				tl.teelog('Failed to posix_fadvise, trying fallocate',level='warning')
+				worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
 			start_read_time = time.perf_counter()
 			try:
 				if os.name == 'posix':
@@ -299,20 +300,18 @@ def read_file(file_name,file_content, file_size,quiet=False,tl=None):
 				else:
 					f.readinto(b)
 			except:  # noqa: E722
-				tl.teelog('Failed to read using os.readv, trying f.readinto',level='warning')
+				worker_log('Failed to read using os.readv, trying f.readinto', level='warning', quiet=quiet)
 				f.readinto(b)
 			end_read_time = time.perf_counter()
 			return start_read_time,end_read_time
 	except Exception as e:
 		import traceback
-		tl.teeerror(str(e))
-		tl.teeerror(traceback.format_exc())
+		worker_log(str(e), level='error', quiet=quiet)
+		worker_log(traceback.format_exc(), level='error', quiet=quiet)
 		return 0,time.perf_counter()
 	
 
-def index_file(file_name,quiet=False,tl=None):
-	if not tl:
-		tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
+def index_file(file_name, quiet=False):
 	try:
 		# index creates file_name.index folder, stat it, then delete it
 		# create the index folder
@@ -328,13 +327,11 @@ def index_file(file_name,quiet=False,tl=None):
 
 	except Exception as e:
 		import traceback
-		tl.teeerror(str(e))
-		tl.teeerror(traceback.format_exc())
+		worker_log(str(e), level='error', quiet=quiet)
+		worker_log(traceback.format_exc(), level='error', quiet=quiet)
 		return 0,time.perf_counter()
 	
-def stat_file(file_name,tl=None):
-	if not tl:
-		tl = Tee_Logger.teeLogger()
+def stat_file(file_name, quiet=False):
 	start_stat_time = time.perf_counter()
 	try:
 		size = os.stat(file_name).st_size
@@ -342,8 +339,8 @@ def stat_file(file_name,tl=None):
 		return start_stat_time,end_stat_time,size
 	except Exception as e:
 		import traceback
-		tl.teeerror(str(e))
-		tl.teeerror(traceback.format_exc())
+		worker_log(str(e), level='error', quiet=quiet)
+		worker_log(traceback.format_exc(), level='error', quiet=quiet)
 		return 0,time.perf_counter(),0
 
 def int_to_color(n, brightness_threshold=500):
@@ -355,21 +352,17 @@ def int_to_color(n, brightness_threshold=500):
 		return int_to_color(hash_value, brightness_threshold)
 	return (r, g, b)
 
-def worker(file_count, file_size, directory, results, mode, counter,quiet,zeros,thread_start_time,tl=None):
-	if not tl:
-		tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
+def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time):
 	local_results = []
 	r, g, b = int_to_color(os.getpid())
-	if not quiet:
-		tl.teeprint(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} scheduled to start at {thread_start_time-time.perf_counter():.4f} later in {mode} mode.' + '\033[0m')
+	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} scheduled to start at {thread_start_time-time.perf_counter():.4f} later in {mode} mode.' + '\033[0m', quiet=quiet)
 	if zeros:
 		file_content = b'\x00' * file_size
 	else:
 		file_content = almost_urandom(file_size)
 	if time.perf_counter() > thread_start_time:
-		tl.teeerror(f'Worker {counter} started late, expected start time {thread_start_time}, actual start time {time.perf_counter()}')
-	if not quiet:
-		tl.teeprint(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} primed, waiting for {thread_start_time-time.perf_counter():.4f} seconds.' + '\033[0m')
+		worker_log(f'Worker {counter} started late, expected start time {thread_start_time}, actual start time {time.perf_counter()}', level='error', quiet=quiet)
+	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} primed, waiting for {thread_start_time-time.perf_counter():.4f} seconds.' + '\033[0m', quiet=quiet)
 	# wait until thread_start_time
 	while time.perf_counter() < thread_start_time:
 		# sleep for 1 ms
@@ -383,51 +376,48 @@ def worker(file_count, file_size, directory, results, mode, counter,quiet,zeros,
 		i = str(i+1).zfill(len(str(file_count)))
 		file_name = os.path.join(directory,str(counter), f"temp_{i}.bin")
 		if mode == 'write':
-			start_write_time,end_write_time = create_file(file_name, file_content,file_size,quiet=quiet,tl=tl)
+			start_write_time,end_write_time = create_file(file_name, file_content, file_size, quiet=quiet)
 			local_results.append(end_write_time- start_write_time)
-			if not quiet:
-				tl.teeprint(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\tin {end_write_time-start_write_time} s"+ '\033[0m') 
+			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\tin {end_write_time-start_write_time} s"+ '\033[0m', quiet=quiet)
 		elif mode == 'read':
-			start_read_time,end_read_time = read_file(file_name, file_content, file_size,quiet,tl=tl)
+			start_read_time,end_read_time = read_file(file_name, file_content, file_size, quiet)
 			local_results.append(end_read_time- start_read_time)
-			if not quiet:
-				tl.teeprint(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\tin {end_read_time-start_read_time} s"+ '\033[0m')
+			worker_log(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\tin {end_read_time-start_read_time} s"+ '\033[0m', quiet=quiet)
 		elif mode == 'random':
 			# here we start a random read or write
 			if bool(random.getrandbits(1)):
-				start_write_time,end_write_time = create_file(file_name, file_content,file_size,quiet=quiet,tl=tl)
+				start_write_time,end_write_time = create_file(file_name, file_content, file_size, quiet=quiet)
 				local_results.append(end_write_time- start_write_time)
-				if not quiet:
-					tl.teeprint(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\tin {end_write_time-start_write_time} s"+ '\033[0m')
+				worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\tin {end_write_time-start_write_time} s"+ '\033[0m', quiet=quiet)
 			else:
-				start_read_time,end_read_time = read_file(file_name,file_content, file_size,quiet,tl=tl)
+				start_read_time,end_read_time = read_file(file_name, file_content, file_size, quiet)
 				local_results.append(end_read_time- start_read_time)
-				if not quiet:
-					tl.teeprint(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\tin {end_read_time-start_read_time} s"+ '\033[0m')
+				worker_log(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\tin {end_read_time-start_read_time} s"+ '\033[0m', quiet=quiet)
 		elif mode == 'comprehensive':
 			resultList = []
-			start_write_time,end_write_time = create_file(file_name, file_content,file_size,quiet=quiet,tl=tl)
+			moved_name = file_name + ".moved"
+			start_write_time,end_write_time = create_file(file_name, file_content, file_size, quiet=quiet)
 			resultList.append(end_write_time- start_write_time)
-			start_move_time,end_move_time = move_file(file_name, file_name + ".moved",tl=tl)
+			start_move_time,end_move_time = move_file(file_name, moved_name, quiet=quiet)
 			resultList.append(end_move_time- start_move_time)
-			start_stat_time,end_stat_time,size = stat_file(file_name + ".moved",tl=tl)
+			start_stat_time,end_stat_time,size = stat_file(moved_name, quiet=quiet)
 			if size != file_size:
-				tl.teeerror(f'{bcolors.critical}File {file_name} size is wrong, expected {file_size}, got {size}\033[0m')
+				worker_log(f'{bcolors.critical}File {file_name} size is wrong, expected {file_size}, got {size}\033[0m', level='error', quiet=quiet)
 			resultList.append(end_stat_time- start_stat_time)
-			start_read_time,end_read_time = read_file(file_name + ".moved",file_content, file_size,quiet,tl=tl)
+			start_read_time,end_read_time = read_file(moved_name, file_content, file_size, quiet)
 			resultList.append(end_read_time- start_read_time)
-			if not quiet:
-				#print(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i + 1}/{file_count}:\t{file_name}\tWrote\tin {end_write_time-start_write_time} s"+ '\033[0m') 
-				tl.teeprint(f'\033[38;2;{r};{g};{b}m[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tW: {resultList[0]:.4f} s M: {resultList[1]:.4f} s S: {resultList[2]:.4f} s R: {resultList[3]:.4f} s\033[0m')
+			try:
+				os.remove(moved_name)
+			except OSError:
+				pass
+			worker_log(f'\033[38;2;{r};{g};{b}m[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tW: {resultList[0]:.4f} s M: {resultList[1]:.4f} s S: {resultList[2]:.4f} s R: {resultList[3]:.4f} s\033[0m', quiet=quiet)
 			local_results.append(resultList)
 		elif mode == 'index':
 			# This will test the indexing performance of the filesystem
-			start_index_time,end_index_time = index_file(file_name, quiet,tl=tl)
+			start_index_time,end_index_time = index_file(file_name, quiet)
 			local_results.append(end_index_time- start_index_time)
-			if not quiet:
-				tl.teeprint(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tIndexed\tin {end_index_time-start_index_time} s"+ '\033[0m')
-	if not quiet:
-		tl.teeprint(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} finished.' + '\033[0m')
+			worker_log(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tIndexed\tin {end_index_time-start_index_time} s"+ '\033[0m', quiet=quiet)
+	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} finished.' + '\033[0m', quiet=quiet)
 	results.extend(local_results)
 
 
@@ -507,7 +497,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 		tl.teeerror(f"Physical available memory: {format_bytes(phyFreeMemory)}B")
 		tl.teeerror(f"Swap available memory: {format_bytes(swapMemory)}B")
 		tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
-		process_count = int((phyFreeMemory + swapMemory ) // file_size // 1.2)
+		process_count = max(int((phyFreeMemory + swapMemory) // file_size // 1.2), 1)
 		tl.teeerror(f"Reducing the number of processes to {process_count}")
 	estimatedTotalMemory = file_size * process_count * 1.2
 	if phyFreeMemory > 0 and estimatedTotalMemory > phyFreeMemory * 0.9:
@@ -539,8 +529,13 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			p.join()
 		genTime = time.perf_counter() - genStartTime
 		genSpeed = sum(results)
-		genTimeCalc = file_size * process_count / genSpeed
-		processStartDelay = + 0.005 * process_count + 1 + genTimeCalc
+		if genSpeed > 0:
+			genTimeCalc = file_size * process_count / genSpeed
+			processStartDelay = 0.005 * process_count + 1 + genTimeCalc
+		else:
+			genTimeCalc = 0
+			processStartDelay = 0.005 * process_count + 1
+			tl.teeerror("File generation benchmark returned zero speed; using minimal process start delay")
 		tl.teeprint(f"Generation speed:      \t{format_bytes(genSpeed)}B/s")
 		tl.teeprint(f"                       \t{format_bytes(genSpeed * 8,use_1024_bytes=False)}b/s")
 		tl.teeprint(f"Generation test time:  \t{genTime:.4f} s")
@@ -555,7 +550,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			for counter in range(process_count):
 				assigned_directory = directories[counter % len(directories)]
 				counter = str(counter).zfill(len(str(process_count)))
-				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter,quiet,zeros,thread_start_time,tl))
+				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time))
 				processes.append(p)
 			totalStartTime = thread_start_time
 			for p in processes:
@@ -578,10 +573,16 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 				addToDicWithoutOverwrite(outResults,'move',moves)
 				addToDicWithoutOverwrite(outResults,'stat',stats)
 				addToDicWithoutOverwrite(outResults,'read',reads)
-				addToDicWithoutOverwrite(totalTime,'write',totalEndTime * (sumWTime / sumAllTime))
-				addToDicWithoutOverwrite(totalTime,'move',totalEndTime * (sumMTime / sumAllTime))
-				addToDicWithoutOverwrite(totalTime,'stat',totalEndTime * (sumSTime / sumAllTime))
-				addToDicWithoutOverwrite(totalTime,'read',totalEndTime * (sumRTime / sumAllTime))
+				if sumAllTime > 0:
+					addToDicWithoutOverwrite(totalTime,'write',totalEndTime * (sumWTime / sumAllTime))
+					addToDicWithoutOverwrite(totalTime,'move',totalEndTime * (sumMTime / sumAllTime))
+					addToDicWithoutOverwrite(totalTime,'stat',totalEndTime * (sumSTime / sumAllTime))
+					addToDicWithoutOverwrite(totalTime,'read',totalEndTime * (sumRTime / sumAllTime))
+				else:
+					addToDicWithoutOverwrite(totalTime,'write',totalEndTime)
+					addToDicWithoutOverwrite(totalTime,'move',totalEndTime)
+					addToDicWithoutOverwrite(totalTime,'stat',totalEndTime)
+					addToDicWithoutOverwrite(totalTime,'read',totalEndTime)
 			else:
 				addToDicWithoutOverwrite(outResults,mode,list(results))
 				addToDicWithoutOverwrite(totalTime,mode,totalEndTime)
@@ -644,9 +645,11 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			report.append("Warning | iotest: 1% high is too high compared to 1% low!")
 			report.append(f"Warning | iotest: 1% high is {one_percent_high_time:.4f} s, 1% low is {one_percent_low_time:.4f} s, threshold is {threshold_to_report_anomaly}")
 		if message_end_point_address:
-			payload = json.dumps({'content':f"Short Report for {mode} mode: Speed {format_bytes(total_bandwidth)}B/s @ {total_p_time / totalTime[mode] * 100:.2f}% IO time"})
-			# use curl to send the message
-			subprocess.run(['curl','-s','-X','POST','-H','Content-Type: application/json','-d',payload,message_end_point_address])
+			if 'write' in mode or 'read' in mode:
+				payload = json.dumps({'content': f"Short Report for {mode} mode: Speed {format_bytes(total_bandwidth)}B/s @ {total_p_time / totalTime[mode] * 100:.2f}% IO time"})
+			else:
+				payload = json.dumps({'content': f"Short Report for {mode} mode: avg {avg_time:.4f} s, median {median_time:.4f} s"})
+			subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', '-d', payload, message_end_point_address])
 	tl.teeprint('\n'.join(report))
 	# write the report to a file
 	if not no_report and outResults:
@@ -656,6 +659,34 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 		tl.teeprint(f"Report written to {report_file_name}")
 		print(f"Log file: {tl.logFileName}")
 	return outResults
+
+MODE_ALIASES = {
+	'r': ['read'],
+	'w': ['write'],
+	'rw': ['write', 'read'],
+	'wr': ['write', 'read'],
+	'i': ['index'],
+	'rwi': ['write', 'read', 'index'],
+	'wri': ['write', 'read', 'index'],
+	'c': ['comprehensive'],
+	'b': ['benchmark'],
+	'read': ['read'],
+	'write': ['write'],
+	'random': ['random'],
+	'index': ['index'],
+	'comprehensive': ['comprehensive'],
+	'benchmark': ['benchmark'],
+}
+
+def parse_modes(mode_args):
+	if isinstance(mode_args, str):
+		mode_args = [mode_args]
+	modes = []
+	for token in mode_args:
+		key = token.lower()
+		if key in MODE_ALIASES:
+			modes.extend(MODE_ALIASES[key])
+	return modes
 
 def climain():
 	default_file_size_str = '30'
@@ -678,19 +709,19 @@ def climain():
 			return int(float(size_arg) * 1024 * 1024)
 		return int(float(size_arg))
 
-	parser = argparse.ArgumentParser(description="Test total disk bandwidth. Default to comprehensive mode: write -> move -> stat -> read")
+	parser = argparse.ArgumentParser(description="Test total disk bandwidth. Default mode is write (w). Comprehensive mode: write -> move -> stat -> read")
 	parser.add_argument("-fs","--file_size", type=str, help="File size (default:30), defaults to mb, can specify in t(b),g(b),m(b),k(b),b", default=None)
 	parser.add_argument("-fc","--file_count", type=int, help="Number of files to create and read per process (default:50)",default=None)
 	parser.add_argument("-t",'-pc',"--process_count", type=int, help="Number of processes to run concurrently (default:36)", default=None)
 	parser.add_argument("-ts","--total_size", type=str, help="Total size target. If -fs/-fc/-pc is omitted, auto-calculate one missing arg to fit this total size.")
 	parser.add_argument('-d',"--directory", action='append', type=str, help="Directory to put the files in. Repeat -d to round-robin workers across directories (default:<pwd>)", default=None)
 	parser.add_argument('-ld',"--log_directory", type=str, help="Directory to put the log files in (default:/var/log/)", default='/var/log/')
-	parser.add_argument("mode", nargs='*', type=str, help="""The mode the script will operate in (default:comprehensive).
- COMPREHENSIVE: async fully cached per thread write - index - read operation (what your code see).
- WRITE: batched all thread write.
- READ: batched all thread read.
- INDEX: creates --file_count amount of index folders, stat it, then delete it.
- RWI: Execute Write - Index - Read mode sequentially in batch mode.""",choices=['read', 'write','random','index','benchmark','comprehensive','r','w','rw','wr','i','rwi','wri','c','b'], default="w")
+	parser.add_argument("mode", nargs='*', type=str, help="""The mode the script will operate in (default: write / w).
+ COMPREHENSIVE: per-thread write -> move -> stat -> read (what your code sees).
+ WRITE: batched all-thread write.
+ READ: batched all-thread read.
+ INDEX: creates --file_count index folders, stat each, then delete.
+ RWI / WRI: run write, then read, then index sequentially in batch mode.""",choices=['read', 'write','random','index','benchmark','comprehensive','r','w','rw','wr','i','rwi','wri','c','b'], default="w")
 	parser.add_argument("-q","--quiet", action="store_true", help="Suppress output, default True in new version",default=True)
 	parser.add_argument("-v","--verbose", action="store_true", help="Verbose output",default=False)
 	parser.add_argument("-S",'--stealth', action="store_true", help="Suppress verbose output and verbose log file",default=False)
@@ -700,7 +731,7 @@ def climain():
 	parser.add_argument('-addr',"--message_end_point_address", type=str, help="The end point address of the message")
 	parser.add_argument('--threshold_to_report_anomaly', type=int, help="The threshold to report if 1 percent high is higher then 1 percent low * <threshold_to_report_anomaly>",default=0)
 	parser.add_argument('-bt',"--benchmark_time", type=int, help="The time in seconds to run the benchmark for file generation speed",default=5)
-	parser.add_argument("-V","--version", action="version", version=f"%(prog)s {version} with teeLogger {Tee_Logger.version} {' and numpy ' if numpy_available else ''} by pan@zopyr.us")
+	parser.add_argument("-V","--version", action="version", version=f"%(prog)s {version} @ {COMMIT_DATE} with teeLogger {Tee_Logger.version} {' and numpy ' if numpy_available else ''} by pan@zopyr.us")
 	args = parser.parse_args()
 	# if we are on windows, set the log directory to the current directory
 	if os.name == 'nt':
@@ -749,37 +780,7 @@ def climain():
 				args.process_count = max(total_size // denominator, 1)
 				tl.teelog(f"Adjusted -t/-pc to {args.process_count} to fit total_size {format_bytes(total_size)}B", level='info')
 
-	modes = []
-	for mode in args.mode:
-		if mode == 'r':
-			modes.append('read')
-		elif mode == 'w':
-			modes.append('write')
-		elif mode == 'rw' or mode == 'wr':
-			modes.append('write')
-			modes.append('read')
-		elif mode == 'i':
-			modes.append('index')
-		elif mode == 'rwi' or mode == 'wri':
-			modes.append('write')
-			modes.append('read')
-			modes.append('index')
-		elif mode == 'c':
-			modes.append('comprehensive')
-		elif mode == 'b':
-			modes.append('benchmark')
-		if 'write' in mode:
-			modes.append('write')
-		if 'read' in mode:
-			modes.append('read')
-		if 'random' in mode:
-			modes.append('random')
-		if 'index' in mode:
-			modes.append('index')
-		if 'comprehensive' in mode:
-			modes.append('comprehensive')
-		if 'benchmark' in mode:
-			modes.append('benchmark')
+	modes = parse_modes(args.mode)
 	# if no directory is provided, use the current directory
 	if args.directory is None:
 		args.directory = [os.getcwd()]

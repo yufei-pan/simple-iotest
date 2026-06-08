@@ -24,10 +24,12 @@ Run the script with:
 iotest [options] [modes]
 ```
 
+Default mode is **write** (`w`) when no mode is specified.
+
 ### Common Options
-- `-fs, --file_size`: Size of the test files (can include suffix like `m`, `g`, etc.).  
-- `-fc, --file_count`: Number of files to process per worker.  
-- `-pc, --process_count`: Number of worker processes.  
+- `-fs, --file_size`: Size of the test files (default: 30 MiB; suffix `m`, `g`, etc. supported).  
+- `-fc, --file_count`: Number of files to process per worker (default: 50).  
+- `-pc, --process_count`: Number of worker processes (default: 36).  
 - `-d, --directory`: Directory for file operations.  
 - `-q, --quiet`: Suppresses output.  
 - `-z, --zeros`: Uses zero-filled data instead of random.  
@@ -35,13 +37,13 @@ iotest [options] [modes]
 - `-nr, --no_report`: Disables result report creation.  
 
 ### Modes
-- `write` / `w`: Only file writes.  
+- `write` / `w`: Only file writes (default).  
 - `read` / `r`: Only file reads.  
 - `index` / `i`: Create and remove temporary index folders.  
 - `random`: Random read/write steps.  
-- `comprehensive` / `c`: Includes write, index, read, etc.  
-- `rw`: Do write → read in the same operation
-- `rwi` or `wri`: Do write → index → read in the same operation.
+- `comprehensive` / `c`: write → move → stat → read per file.  
+- `rw` / `wr`: Run write, then read sequentially in batch mode.  
+- `rwi` / `wri`: Run write, then read, then index sequentially in batch mode.
 
 Example:
 ```bash
@@ -59,14 +61,13 @@ usage: iotest [-h] [-fs FILE_SIZE] [-fc FILE_COUNT] [-t PROCESS_COUNT] [-d DIREC
               [-V]
               [{comprehensive,read,write,random,index,r,w,rw,wr,i,rwi,wri,c} ...]
 
-Test total disk bandwidth. Default to comprehensive mode: write -> move -> stat -> read
+Test total disk bandwidth. Default mode is write (w). Comprehensive mode: write -> move -> stat -> read
 
 positional arguments:
   {comprehensive,read,write,random,index,r,w,rw,wr,i,rwi,wri,c}
-                        The mode the script will operate in (default:comprehensive). COMPREHENSIVE: async fully cached per thread write
-                        - index - read operation. WRITE: batched all thread write. READ: batched all thread read. INDEX: creates
-                        --file_count amount of index folders, stat it, then delete it. RWI: Execute Write - Index - Read mode
-                        sequentially in batch mode.
+                        The mode the script will operate in (default: write / w). COMPREHENSIVE: per-thread write -> move -> stat -> read.
+                        WRITE: batched all-thread write. READ: batched all-thread read. INDEX: creates --file_count index folders,
+                        stat each, then delete. RWI / WRI: run write, then read, then index sequentially in batch mode.
 
 options:
   -h, --help            show this help message and exit
@@ -75,7 +76,7 @@ options:
   -fc, --file_count FILE_COUNT
                         Number of files to create and read per process (default:50)
   -t, -pc, --process_count PROCESS_COUNT
-                        Number of processes to run concurrently (default:27)
+                        Number of processes to run concurrently (default:36)
   -d, --directory DIRECTORY
                         Directory to put the files in (default:<pwd>)
   -ld, --log_directory LOG_DIRECTORY
