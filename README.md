@@ -30,6 +30,8 @@ Default mode is **write** (`w`) when no mode is specified.
 - `-fs, --file_size`: Size of the test files (default: 30 MiB; suffix `m`, `g`, etc. supported).  
 - `-fc, --file_count`: Number of files to process per worker (default: 50).  
 - `-pc, --process_count`: Number of worker processes (default: 36).  
+- `-wtpt, --write_target_throughput`: Target sync write throughput (e.g. `500m`, `2g`); auto-tunes the first write pass.  
+- `-rtpt, --read_target_throughput`: Target sync read throughput; auto-tunes the first read pass. For simultaneous mode with both targets, the initial writer/reader split is estimated from the target ratio before tuning.  
 - `-d, --directory`: Directory for file operations.  
 - `-q, --quiet`: Suppresses output.  
 - `-z, --zeros`: Uses zero-filled data instead of random.  
@@ -43,6 +45,7 @@ Default mode is **write** (`w`) when no mode is specified.
 - `random`: Random read/write steps.  
 - `comprehensive` / `c`: write → move → stat → read per file.  
 - `rw` / `wr`: Run write, then read sequentially in batch mode.  
+- `simultaneous` / `s`: Pre-writes read targets, then runs half the workers writing and half reading concurrently on separate files. Removes all temp files when done.  
 - `rwi` / `wri`: Run write, then read, then index sequentially in batch mode.
 
 Example:
@@ -51,6 +54,11 @@ iotest -fs 50m -fc 100 -pc 4 -d /tmp/iotest write read
 ```
 Will launch 4 processes each write same random 50MiB size data to 100 seperate files sequentially.
 Then will launch another 4 processes reading the same files.
+
+Simultaneous read/write example:
+```bash
+iotest -fs 50m -fc 20 -pc 8 -d /tmp/iotest simultaneous
+```
 
 Check the available arguments with `-h` or `--help` for more details.
 

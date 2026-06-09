@@ -5,7 +5,9 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
+import sys
 import time
 from multiprocessing import Manager, Process
 
@@ -16,7 +18,7 @@ try:
 except ImportError:
 	numpy_available = False
 
-version = '3.63.0'
+version = '3.66.0'
 COMMIT_DATE = '2026-06-08'
 __version__ = version
 
@@ -420,6 +422,81 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} finished.' + '\033[0m', quiet=quiet)
 	results.extend(local_results)
 
+def simultaneous_worker_dir(base_directory, run_id, counter):
+	return os.path.join(base_directory, f".iotest_simul_{run_id}", f"worker_{counter}")
+
+def layout_read_worker(file_count, file_size, base_directory, run_id, counter, quiet, zeros):
+	if zeros:
+		file_content = b'\x00' * file_size
+	else:
+		file_content = almost_urandom(file_size)
+	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
+	os.makedirs(worker_dir, exist_ok=True)
+	for i in range(file_count):
+		i_str = str(i + 1).zfill(len(str(file_count)))
+		file_name = os.path.join(worker_dir, f"read_{i_str}.bin")
+		create_file(file_name, file_content, file_size, quiet=quiet)
+
+def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id, counter, results, quiet, zeros, thread_start_time):
+	local_results = []
+	r, g, b = int_to_color(os.getpid())
+	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} ({role}) scheduled to start at {thread_start_time-time.perf_counter():.4f} later.' + '\033[0m', quiet=quiet)
+	if zeros:
+		file_content = b'\x00' * file_size
+	else:
+		file_content = almost_urandom(file_size)
+	while time.perf_counter() < thread_start_time:
+		time.sleep(0.001)
+	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
+	os.makedirs(worker_dir, exist_ok=True)
+	file_prefix = 'write_' if role == 'write' else 'read_'
+	for i in range(file_count):
+		i_str = str(i + 1).zfill(len(str(file_count)))
+		file_name = os.path.join(worker_dir, f"{file_prefix}{i_str}.bin")
+		if role == 'write':
+			start_time, end_time = create_file(file_name, file_content, file_size, quiet=quiet)
+			local_results.append(end_time - start_time)
+			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tWrote\tin {end_time-start_time} s" + '\033[0m', quiet=quiet)
+		else:
+			start_time, end_time = read_file(file_name, file_content, file_size, quiet)
+			local_results.append(end_time - start_time)
+			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tRead\tin {end_time-start_time} s" + '\033[0m', quiet=quiet)
+	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} ({role}) finished.' + '\033[0m', quiet=quiet)
+	results.extend(local_results)
+
+def cleanup_simultaneous_tree(directories, run_id, process_count):
+	seen = set()
+	for counter in range(process_count):
+		base = directories[counter % len(directories)]
+		simul_root = os.path.join(base, f".iotest_simul_{run_id}")
+		if simul_root not in seen:
+			seen.add(simul_root)
+			if os.path.isdir(simul_root):
+				shutil.rmtree(simul_root, ignore_errors=True)
+
+def run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
+		counter_padding_process_count, quiet, zeros, tl):
+	tl.teeprint(f"Simultaneous mode: layout pass writing read files ({layout_worker_count} workers)...")
+	layout_start = time.perf_counter()
+	layout_processes = []
+	for counter in range(layout_worker_count):
+		assigned_directory = directories[counter % len(directories)]
+		counter_str = str(counter).zfill(len(str(counter_padding_process_count)))
+		p = Process(target=layout_read_worker, args=(file_count, file_size, assigned_directory, run_id, counter_str, quiet, zeros))
+		layout_processes.append(p)
+	for p in layout_processes:
+		p.start()
+	for p in layout_processes:
+		p.join()
+	tl.teeprint(f"Layout pass complete in {time.perf_counter() - layout_start:.4f} s")
+
+def normalize_directories(directory):
+	if isinstance(directory, str):
+		return [directory]
+	if directory is None:
+		return [os.getcwd()]
+	return list(directory)
+
 
 # This code adds a key to a dictionary, 
 # but if the key already exists, 
@@ -455,7 +532,43 @@ def benchmarkGenSpeed(file_size, file_count,zeros,results,timeout=5):
 	genSpeed = genSize / genTime 
 	results.append(genSpeed)
 
-def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5):
+TUNING_TOLERANCE = 1.10
+MAX_TUNING_ATTEMPTS = 20
+SIMULTANEOUS_TUNING_BENCHMARK_TIME = 1
+
+def supports_write_throughput_tuning(modes):
+	return 'write' in modes or 'comprehensive' in modes or 'simultaneous' in modes
+
+def supports_read_throughput_tuning(modes):
+	return 'read' in modes or 'comprehensive' in modes or 'simultaneous' in modes
+
+def throughput_status(measured, target):
+	if measured is None:
+		return 'missing'
+	if measured < target:
+		return 'below'
+	if measured <= target * TUNING_TOLERANCE:
+		return 'ok'
+	return 'above'
+
+def sync_bandwidth_bps(outResults, totalTime, file_size, file_count, process_count, mode, mode_process_counts=None):
+	if mode not in outResults or mode not in totalTime or totalTime[mode] <= 0:
+		return None
+	effective_pc = (mode_process_counts or {}).get(mode, process_count)
+	total_size = file_size * file_count * effective_pc
+	return total_size / totalTime[mode]
+
+def measure_role_bandwidth(result, role):
+	return sync_bandwidth_bps(
+		result['outResults'], result['totalTime'],
+		result['file_size'], result['file_count'],
+		result['process_count'], role,
+		result.get('mode_process_counts'))
+
+def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None):
+	if tuning_attempt:
+		no_report = True
+		message_end_point_address = None
 	if stealth:
 		quiet = True
 		no_report = True
@@ -476,6 +589,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 	file_size = int(file_size)
 	outResults = dict()
 	totalTime = {}
+	mode_process_counts = {}
 	estimatedTotalMemory = file_size * process_count * 1.2
 	phyFreeMemory = -1
 	swapMemory = -1
@@ -512,37 +626,108 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 	with Manager() as manager:
 		# bench mark file generation performance first
 		results = manager.list()
-		if zeros:
-			generator = 'zeros'
-		elif numpy_available:
-			generator = 'numpy SFC64'
+		is_simultaneous = 'simultaneous' in modes
+		if is_simultaneous:
+			if simultaneous_write_count is not None:
+				gen_benchmark_workers = simultaneous_write_count
+			else:
+				gen_benchmark_workers = process_count // 2
 		else:
-			generator = 'random.getrandbits'
-		tl.teeprint(f"Benchmarking file generation performance... using {process_count}x {generator} with {format_bytes(file_size)}B files * {file_count if file_count else '∞'} for {benchmarkTime}s")
-		for counter in range(process_count):
-			p = Process(target=benchmarkGenSpeed, args=(file_size, file_count,zeros,results,benchmarkTime))
-			processes.append(p)
-		genStartTime = time.perf_counter()
-		for p in processes:
-			p.start()
-		for p in processes:
-			p.join()
-		genTime = time.perf_counter() - genStartTime
-		genSpeed = sum(results)
-		if genSpeed > 0:
-			genTimeCalc = file_size * process_count / genSpeed
-			processStartDelay = 0.005 * process_count + 1 + genTimeCalc
-		else:
+			gen_benchmark_workers = process_count
+		effective_benchmark_time = benchmarkTime
+		if is_simultaneous and tuning_attempt:
+			effective_benchmark_time = SIMULTANEOUS_TUNING_BENCHMARK_TIME
+		if is_simultaneous and gen_benchmark_workers == 0:
+			genSpeed = 0
 			genTimeCalc = 0
 			processStartDelay = 0.005 * process_count + 1
-			tl.teeerror("File generation benchmark returned zero speed; using minimal process start delay")
-		tl.teeprint(f"Generation speed:      \t{format_bytes(genSpeed)}B/s")
-		tl.teeprint(f"                       \t{format_bytes(genSpeed * 8,use_1024_bytes=False)}b/s")
-		tl.teeprint(f"Generation test time:  \t{genTime:.4f} s")
-		tl.teeprint(f"Gen time calculated:   \t{genTimeCalc:.4f} s")
-		tl.teeprint(f"Process start delay:   \t{processStartDelay:.4f} s")
+			tl.teeprint("Skipping file generation benchmark (no write workers in simultaneous mode)")
+		else:
+			if zeros:
+				generator = 'zeros'
+			elif numpy_available:
+				generator = 'numpy SFC64'
+			else:
+				generator = 'random.getrandbits'
+			tl.teeprint(f"Benchmarking file generation performance... using {gen_benchmark_workers}x {generator} with {format_bytes(file_size)}B files * {file_count if file_count else '∞'} for {effective_benchmark_time}s")
+			for counter in range(gen_benchmark_workers):
+				p = Process(target=benchmarkGenSpeed, args=(file_size, file_count,zeros,results,effective_benchmark_time))
+				processes.append(p)
+			genStartTime = time.perf_counter()
+			for p in processes:
+				p.start()
+			for p in processes:
+				p.join()
+			processes.clear()
+			genTime = time.perf_counter() - genStartTime
+			genSpeed = sum(results)
+			if genSpeed > 0:
+				genTimeCalc = file_size * gen_benchmark_workers / genSpeed
+				processStartDelay = 0.005 * process_count + 1 + genTimeCalc
+			else:
+				genTimeCalc = 0
+				processStartDelay = 0.005 * process_count + 1
+				tl.teeerror("File generation benchmark returned zero speed; using minimal process start delay")
+			tl.teeprint(f"Generation speed:      \t{format_bytes(genSpeed)}B/s")
+			tl.teeprint(f"                       \t{format_bytes(genSpeed * 8,use_1024_bytes=False)}b/s")
+			tl.teeprint(f"Generation test time:  \t{genTime:.4f} s")
+			tl.teeprint(f"Gen time calculated:   \t{genTimeCalc:.4f} s")
+			tl.teeprint(f"Process start delay:   \t{processStartDelay:.4f} s")
 		for mode in modes:
 			if mode == 'benchmark':
+				continue
+			if mode == 'simultaneous':
+				if process_count < 2:
+					raise ValueError("simultaneous mode requires process_count >= 2")
+				if simultaneous_write_count is not None:
+					write_count = simultaneous_write_count
+					read_count = process_count - write_count
+				else:
+					write_count = process_count // 2
+					read_count = process_count - write_count
+				if write_count < 1 or read_count < 1:
+					raise ValueError("simultaneous mode requires at least 1 writer and 1 reader")
+				mode_process_counts = {'write': write_count, 'read': read_count}
+				run_id = simultaneous_run_id or tl.currentDateTime
+				layout_padding_pc = simultaneous_layout_process_count or process_count
+				layout_worker_count = simultaneous_layout_workers if simultaneous_layout_workers is not None else process_count
+				try:
+					if not simultaneous_skip_layout:
+						run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
+							layout_padding_pc, quiet, zeros, tl)
+					write_results = manager.list()
+					read_results = manager.list()
+					write_processes = []
+					read_processes = []
+					thread_start_time = time.perf_counter() + processStartDelay
+					tl.teeprint(f"Simultaneous mode: {write_count} writers + {read_count} readers...")
+					for counter in range(write_count):
+						assigned_directory = directories[counter % len(directories)]
+						counter_str = str(counter).zfill(len(str(process_count)))
+						p = Process(target=simultaneous_role_worker, args=('write', file_count, file_size, assigned_directory, run_id, counter_str, write_results, quiet, zeros, thread_start_time))
+						write_processes.append(p)
+					for counter in range(read_count):
+						assigned_directory = directories[counter % len(directories)]
+						counter_str = str(counter).zfill(len(str(process_count)))
+						p = Process(target=simultaneous_role_worker, args=('read', file_count, file_size, assigned_directory, run_id, counter_str, read_results, quiet, zeros, thread_start_time))
+						read_processes.append(p)
+					totalStartTime = thread_start_time
+					for p in write_processes + read_processes:
+						p.start()
+					for p in write_processes:
+						p.join()
+					write_sync_time = time.perf_counter() - totalStartTime
+					for p in read_processes:
+						p.join()
+					read_sync_time = time.perf_counter() - totalStartTime
+					addToDicWithoutOverwrite(outResults, 'write', list(write_results))
+					addToDicWithoutOverwrite(outResults, 'read', list(read_results))
+					addToDicWithoutOverwrite(totalTime, 'write', write_sync_time)
+					addToDicWithoutOverwrite(totalTime, 'read', read_sync_time)
+				finally:
+					if not simultaneous_skip_cleanup:
+						cleanup_simultaneous_tree(directories, run_id, layout_padding_pc)
+						tl.teeprint("Simultaneous mode: cleaned up temporary files.")
 				continue
 			processes = []
 			results = manager.list()
@@ -625,8 +810,9 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 		zero_point_one_percent_high_time = outResults[mode][int(len(outResults[mode]) * 0.999)]
 		highest_time = outResults[mode][-1]
 		if 'write' in mode or 'read' in mode:
-			total_size = file_size * file_count * process_count
-			total_p_time = sum(outResults[mode]) / process_count
+			effective_pc = mode_process_counts.get(mode, process_count)
+			total_size = file_size * file_count * effective_pc
+			total_p_time = sum(outResults[mode]) / effective_pc
 			total_bandwidth = total_size / total_p_time
 			report.append(f"Total {mode} size:      \t{format_bytes(total_size)}B")
 			report.append(f"{mode} bandwidth (call):\t{format_bytes(total_bandwidth)}B/s")
@@ -658,7 +844,14 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			f.write('\n'.join(report))
 		tl.teeprint(f"Report written to {report_file_name}")
 		print(f"Log file: {tl.logFileName}")
-	return outResults
+	return {
+		'outResults': outResults,
+		'totalTime': totalTime,
+		'process_count': process_count,
+		'file_size': file_size,
+		'file_count': file_count,
+		'mode_process_counts': mode_process_counts,
+	}
 
 MODE_ALIASES = {
 	'r': ['read'],
@@ -676,6 +869,8 @@ MODE_ALIASES = {
 	'index': ['index'],
 	'comprehensive': ['comprehensive'],
 	'benchmark': ['benchmark'],
+	's': ['simultaneous'],
+	'simultaneous': ['simultaneous'],
 }
 
 def parse_modes(mode_args):
@@ -687,6 +882,376 @@ def parse_modes(mode_args):
 		if key in MODE_ALIASES:
 			modes.extend(MODE_ALIASES[key])
 	return modes
+
+def _simultaneous_session_kwargs(run_id, max_pc, skip_layout=True, skip_cleanup=True):
+	return {
+		'simultaneous_run_id': run_id,
+		'simultaneous_skip_layout': skip_layout,
+		'simultaneous_skip_cleanup': skip_cleanup,
+		'simultaneous_layout_process_count': max_pc,
+	}
+
+def _run_tuning_main(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+		stealth, threshold_to_report_anomaly, benchmarkTime, simultaneous_write_count=None,
+		simultaneous_session=None):
+	kwargs = simultaneous_session or {}
+	return main(file_size, file_count, process_count, directory, modes, quiet, zeros, tl=tl,
+		stealth=stealth, message_end_point_address=None, no_report=True,
+		threshold_to_report_anomaly=threshold_to_report_anomaly, benchmarkTime=benchmarkTime,
+		tuning_attempt=True, simultaneous_write_count=simultaneous_write_count, **kwargs)
+
+def _finalize_tuning_run(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+		stealth, message_end_point_address, no_report, threshold_to_report_anomaly, benchmarkTime,
+		simultaneous_write_count=None, simultaneous_session=None):
+	if not no_report or message_end_point_address:
+		kwargs = simultaneous_session or {}
+		main(file_size, file_count, process_count, directory, modes, quiet, zeros, tl=tl,
+			stealth=stealth, message_end_point_address=message_end_point_address,
+			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
+			benchmarkTime=benchmarkTime, tuning_attempt=False,
+			simultaneous_write_count=simultaneous_write_count, **kwargs)
+
+def tune_single_role(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+		role, target_bps, stealth=False, message_end_point_address=None, no_report=False,
+		threshold_to_report_anomaly=0, benchmarkTime=5, simultaneous_write_count=None):
+	pc = process_count
+	tl.teeprint(f"Target throughput tuning: {role} target={format_bytes(target_bps)}B/s, starting process_count={pc}")
+	for attempt in range(1, MAX_TUNING_ATTEMPTS + 1):
+		result = _run_tuning_main(file_size, file_count, pc, directory, modes, quiet, zeros, tl,
+			stealth, threshold_to_report_anomaly, benchmarkTime, simultaneous_write_count)
+		effective_pc = result['process_count']
+		measured = measure_role_bandwidth(result, role)
+		if measured is None:
+			tl.teeerror(f"Cannot measure sync bandwidth for {role}")
+			sys.exit(1)
+		status = throughput_status(measured, target_bps)
+		tl.teeprint(f"tpt attempt {attempt}: pc={effective_pc} {role}={format_bytes(measured)}B/s "
+			f"target={format_bytes(target_bps)}B/s (max {format_bytes(target_bps * TUNING_TOLERANCE)}B/s)")
+		if status == 'below':
+			if attempt == 1:
+				tl.teeerror(f"Cannot meet {role} target throughput {format_bytes(target_bps)}B/s: "
+					f"measured {format_bytes(measured)}B/s at process_count={effective_pc}. "
+					f"Not increasing process_count.")
+			else:
+				tl.teeerror(f"Overshot {role} target while tuning: measured {format_bytes(measured)}B/s "
+					f"at process_count={effective_pc}.")
+			sys.exit(1)
+		if status == 'ok':
+			tl.teeprint(f"{role} target throughput reached: process_count={effective_pc}, "
+				f"measured={format_bytes(measured)}B/s")
+			_finalize_tuning_run(file_size, file_count, effective_pc, directory, modes, quiet, zeros, tl,
+				stealth, message_end_point_address, no_report, threshold_to_report_anomaly,
+				benchmarkTime, simultaneous_write_count)
+			return 0
+		if effective_pc <= 1:
+			tl.teeprint(f"At process_count=1, {role} measured {format_bytes(measured)}B/s still above target; "
+				f"accepting as best effort.")
+			_finalize_tuning_run(file_size, file_count, 1, directory, modes, quiet, zeros, tl,
+				stealth, message_end_point_address, no_report, threshold_to_report_anomaly,
+				benchmarkTime, simultaneous_write_count)
+			return 0
+		new_pc = max(1, int(effective_pc * target_bps / measured))
+		if new_pc >= effective_pc:
+			new_pc = effective_pc - 1
+		pc = new_pc
+	tl.teeerror("Target throughput tuning exceeded maximum attempts.")
+	sys.exit(1)
+
+def tune_dual_role_shared_pc(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+		write_target, read_target, stealth=False, message_end_point_address=None, no_report=False,
+		threshold_to_report_anomaly=0, benchmarkTime=5):
+	pc = process_count
+	tl.teeprint(f"Target throughput tuning: write target={format_bytes(write_target)}B/s, "
+		f"read target={format_bytes(read_target)}B/s, starting process_count={pc}")
+	for attempt in range(1, MAX_TUNING_ATTEMPTS + 1):
+		result = _run_tuning_main(file_size, file_count, pc, directory, modes, quiet, zeros, tl,
+			stealth, threshold_to_report_anomaly, benchmarkTime)
+		effective_pc = result['process_count']
+		write_measured = measure_role_bandwidth(result, 'write')
+		read_measured = measure_role_bandwidth(result, 'read')
+		if write_measured is None or read_measured is None:
+			tl.teeerror("Cannot measure sync bandwidth for write/read")
+			sys.exit(1)
+		write_status = throughput_status(write_measured, write_target)
+		read_status = throughput_status(read_measured, read_target)
+		tl.teeprint(f"tpt attempt {attempt}: pc={effective_pc} write={format_bytes(write_measured)}B/s "
+			f"(target {format_bytes(write_target)}B/s) read={format_bytes(read_measured)}B/s "
+			f"(target {format_bytes(read_target)}B/s)")
+		if write_status == 'below' or read_status == 'below':
+			if attempt == 1:
+				if write_status == 'below':
+					tl.teeerror(f"Cannot meet write target throughput {format_bytes(write_target)}B/s: "
+						f"measured {format_bytes(write_measured)}B/s at process_count={effective_pc}.")
+				if read_status == 'below':
+					tl.teeerror(f"Cannot meet read target throughput {format_bytes(read_target)}B/s: "
+						f"measured {format_bytes(read_measured)}B/s at process_count={effective_pc}.")
+				tl.teeerror("Not increasing process_count.")
+			else:
+				tl.teeerror("Overshot target while tuning shared process_count.")
+			sys.exit(1)
+		if write_status == 'ok' or read_status == 'ok':
+			tl.teeprint(f"Target throughput reached: process_count={effective_pc}, "
+				f"write={format_bytes(write_measured)}B/s, read={format_bytes(read_measured)}B/s")
+			_finalize_tuning_run(file_size, file_count, effective_pc, directory, modes, quiet, zeros, tl,
+				stealth, message_end_point_address, no_report, threshold_to_report_anomaly, benchmarkTime)
+			return 0
+		if effective_pc <= 1:
+			tl.teeprint("At process_count=1, both write and read still above target; accepting as best effort.")
+			_finalize_tuning_run(file_size, file_count, 1, directory, modes, quiet, zeros, tl,
+				stealth, message_end_point_address, no_report, threshold_to_report_anomaly, benchmarkTime)
+			return 0
+		new_pc = max(1, min(int(effective_pc * write_target / write_measured),
+			int(effective_pc * read_target / read_measured)))
+		if new_pc >= effective_pc:
+			new_pc = effective_pc - 1
+		pc = new_pc
+	tl.teeerror("Target throughput tuning exceeded maximum attempts.")
+	sys.exit(1)
+
+def estimate_simultaneous_split(process_count, write_target, read_target):
+	total_target = write_target + read_target
+	write_count = max(1, min(process_count - 1, int(round(process_count * write_target / total_target))))
+	read_count = process_count - write_count
+	return write_count, read_count
+
+def tune_simultaneous(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+		write_target, read_target, stealth=False, message_end_point_address=None, no_report=False,
+		threshold_to_report_anomaly=0, benchmarkTime=5):
+	benchmarkTime = SIMULTANEOUS_TUNING_BENCHMARK_TIME
+	max_pc = process_count
+	pc = process_count
+	directories = normalize_directories(directory)
+	for output_dir in directories:
+		os.makedirs(output_dir, exist_ok=True)
+	run_id = tl.currentDateTime
+	layout_workers = max(max_pc - 1, 1)
+	sim_session = _simultaneous_session_kwargs(run_id, max_pc)
+	if write_target and read_target:
+		write_count, read_count = estimate_simultaneous_split(pc, write_target, read_target)
+		split_note = (f"estimated {write_count} writers + {read_count} readers from target ratio "
+			f"({format_bytes(write_target)}B/s write / {format_bytes(read_target)}B/s read)")
+	else:
+		write_count = pc // 2
+		read_count = pc - write_count
+		split_note = f"{write_count} writers + {read_count} readers"
+	target_desc = []
+	if write_target:
+		target_desc.append(f"write={format_bytes(write_target)}B/s")
+	if read_target:
+		target_desc.append(f"read={format_bytes(read_target)}B/s")
+	tl.teeprint(f"Simultaneous throughput tuning: {', '.join(target_desc)}, "
+		f"starting process_count={pc} ({split_note})")
+	def reset_split_for_pc(new_pc):
+		nonlocal write_count, read_count
+		if write_target and read_target:
+			write_count, read_count = estimate_simultaneous_split(new_pc, write_target, read_target)
+		else:
+			write_count = new_pc // 2
+			read_count = new_pc - write_count
+	def finalize_simultaneous_tuning():
+		_finalize_tuning_run(file_size, file_count, pc, directory, modes, quiet, zeros, tl,
+			stealth, message_end_point_address, no_report, threshold_to_report_anomaly,
+			benchmarkTime, write_count, simultaneous_session=sim_session)
+	last_valid = None
+	def note_valid_config():
+		nonlocal last_valid
+		last_valid = {
+			'pc': pc,
+			'write_count': write_count,
+			'read_count': read_count,
+			'write_measured': write_measured,
+			'read_measured': read_measured,
+		}
+	def accept_last_valid(reason):
+		nonlocal pc, write_count, read_count
+		if last_valid is None:
+			return False
+		pc = last_valid['pc']
+		write_count = last_valid['write_count']
+		read_count = last_valid['read_count']
+		tl.teeprint(f"{reason} Accepting {write_count}w+{read_count}r at pc={pc} "
+			f"(write={format_bytes(last_valid['write_measured'])}B/s, "
+			f"read={format_bytes(last_valid['read_measured'])}B/s).")
+		finalize_simultaneous_tuning()
+		return True
+	try:
+		run_simultaneous_layout(file_count, file_size, directories, run_id, layout_workers, max_pc, quiet, zeros, tl)
+		for attempt in range(1, MAX_TUNING_ATTEMPTS + 1):
+			result = _run_tuning_main(file_size, file_count, pc, directory, modes, quiet, zeros, tl,
+				stealth, threshold_to_report_anomaly, benchmarkTime, write_count,
+				simultaneous_session=sim_session)
+			write_measured = measure_role_bandwidth(result, 'write')
+			read_measured = measure_role_bandwidth(result, 'read')
+			if write_measured is None or read_measured is None:
+				tl.teeerror("Cannot measure sync bandwidth for simultaneous write/read")
+				sys.exit(1)
+			write_status = throughput_status(write_measured, write_target) if write_target else None
+			read_status = throughput_status(read_measured, read_target) if read_target else None
+			tl.teeprint(f"tpt attempt {attempt}: pc={pc} ({write_count}w+{read_count}r) "
+				f"write={format_bytes(write_measured)}B/s read={format_bytes(read_measured)}B/s")
+			if write_target and not read_target:
+				if write_status != 'below':
+					note_valid_config()
+				if write_status == 'below':
+					if accept_last_valid("Cannot reduce write workers without missing write target;"):
+						return 0
+					if read_count > 1:
+						write_count += 1
+						read_count -= 1
+						continue
+					tl.teeerror(f"Cannot meet write target throughput {format_bytes(write_target)}B/s: "
+						f"measured {format_bytes(write_measured)}B/s.")
+					sys.exit(1)
+				if write_status == 'ok':
+					tl.teeprint(f"Write target reached: {write_count} writers + {read_count} readers, "
+						f"measured={format_bytes(write_measured)}B/s")
+					finalize_simultaneous_tuning()
+					return 0
+				if write_count > 1:
+					write_count -= 1
+					read_count += 1
+					continue
+				if pc > 2:
+					pc -= 1
+					reset_split_for_pc(pc)
+					continue
+				tl.teeprint("At minimum simultaneous configuration; accepting as best effort.")
+				finalize_simultaneous_tuning()
+				return 0
+			if read_target and not write_target:
+				if read_status != 'below':
+					note_valid_config()
+				if read_status == 'below':
+					if accept_last_valid("Cannot reduce read workers without missing read target;"):
+						return 0
+					if write_count > 1:
+						write_count -= 1
+						read_count += 1
+						continue
+					tl.teeerror(f"Cannot meet read target throughput {format_bytes(read_target)}B/s: "
+						f"measured {format_bytes(read_measured)}B/s.")
+					sys.exit(1)
+				if read_status == 'ok':
+					tl.teeprint(f"Read target reached: {write_count} writers + {read_count} readers, "
+						f"measured={format_bytes(read_measured)}B/s")
+					finalize_simultaneous_tuning()
+					return 0
+				if read_count > 1:
+					write_count += 1
+					read_count -= 1
+					continue
+				if pc > 2:
+					pc -= 1
+					reset_split_for_pc(pc)
+					continue
+				tl.teeprint("At minimum simultaneous configuration; accepting as best effort.")
+				finalize_simultaneous_tuning()
+				return 0
+			if write_status == 'below' and read_status == 'below':
+				tl.teeerror("Cannot meet both write and read target throughput at current process_count.")
+				tl.teeerror(f"Write measured {format_bytes(write_measured)}B/s "
+					f"(target {format_bytes(write_target)}B/s).")
+				tl.teeerror(f"Read measured {format_bytes(read_measured)}B/s "
+					f"(target {format_bytes(read_target)}B/s).")
+				sys.exit(1)
+			if write_status != 'below' and read_status != 'below':
+				note_valid_config()
+			if write_status == 'below' or read_status == 'below':
+				if accept_last_valid("Cannot adjust worker ratio without missing a target;"):
+					return 0
+				if write_status == 'below' and read_count > 1:
+					write_count += 1
+					read_count -= 1
+					continue
+				if read_status == 'below' and write_count > 1:
+					write_count -= 1
+					read_count += 1
+					continue
+				tl.teeerror("Cannot balance simultaneous write/read ratio to meet both targets.")
+				sys.exit(1)
+			if write_status == 'ok' and read_status == 'ok':
+				if pc <= 2:
+					tl.teeprint(f"Both targets reached: pc={pc} ({write_count}w+{read_count}r), "
+						f"write={format_bytes(write_measured)}B/s, read={format_bytes(read_measured)}B/s")
+					finalize_simultaneous_tuning()
+					return 0
+				pc -= 1
+				reset_split_for_pc(pc)
+				continue
+			if write_status == 'above' and read_status == 'above':
+				write_ratio = write_measured / write_target
+				read_ratio = read_measured / read_target
+				if write_ratio > read_ratio and write_count > 1:
+					write_count -= 1
+					read_count += 1
+					continue
+				if read_ratio > write_ratio and read_count > 1:
+					write_count += 1
+					read_count -= 1
+					continue
+				if pc > 2:
+					pc -= 1
+					reset_split_for_pc(pc)
+					continue
+				tl.teeprint("At minimum simultaneous configuration with both above target; accepting as best effort.")
+				finalize_simultaneous_tuning()
+				return 0
+			if write_status == 'above' and read_status == 'ok':
+				if write_count > 1:
+					write_count -= 1
+					read_count += 1
+					continue
+				if pc > 2:
+					pc -= 1
+					reset_split_for_pc(pc)
+					continue
+				finalize_simultaneous_tuning()
+				return 0
+			if read_status == 'above' and write_status == 'ok':
+				if read_count > 1:
+					write_count += 1
+					read_count -= 1
+					continue
+				if pc > 2:
+					pc -= 1
+					reset_split_for_pc(pc)
+					continue
+				finalize_simultaneous_tuning()
+				return 0
+		tl.teeerror("Simultaneous throughput tuning exceeded maximum attempts.")
+		sys.exit(1)
+	finally:
+		cleanup_simultaneous_tree(directories, run_id, max_pc)
+		tl.teeprint("Simultaneous mode: cleaned up temporary files.")
+
+def tune_for_targets(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+		write_target, read_target, stealth=False, message_end_point_address=None, no_report=False,
+		threshold_to_report_anomaly=0, benchmarkTime=5):
+	if 'simultaneous' in modes:
+		tune_simultaneous(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+			write_target, read_target, stealth=stealth, message_end_point_address=message_end_point_address,
+			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
+			benchmarkTime=benchmarkTime)
+		return
+	is_comprehensive = 'comprehensive' in modes
+	is_dual_phase = 'write' in modes and 'read' in modes and not is_comprehensive
+	if write_target and read_target and (is_comprehensive or is_dual_phase):
+		tune_dual_role_shared_pc(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+			write_target, read_target, stealth=stealth, message_end_point_address=message_end_point_address,
+			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
+			benchmarkTime=benchmarkTime)
+		return
+	if write_target:
+		tune_single_role(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+			'write', write_target, stealth=stealth, message_end_point_address=message_end_point_address,
+			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
+			benchmarkTime=benchmarkTime)
+		return
+	if read_target:
+		tune_single_role(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+			'read', read_target, stealth=stealth, message_end_point_address=message_end_point_address,
+			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
+			benchmarkTime=benchmarkTime)
 
 def climain():
 	default_file_size_str = '30'
@@ -721,7 +1286,8 @@ def climain():
  WRITE: batched all-thread write.
  READ: batched all-thread read.
  INDEX: creates --file_count index folders, stat each, then delete.
- RWI / WRI: run write, then read, then index sequentially in batch mode.""",choices=['read', 'write','random','index','benchmark','comprehensive','r','w','rw','wr','i','rwi','wri','c','b'], default="w")
+ RWI / WRI: run write, then read, then index sequentially in batch mode.
+ SIMULTANEOUS / S: layout write pass for read files, then concurrent write+read on separate files; cleans up afterward.""",choices=['read', 'write','random','index','benchmark','comprehensive','simultaneous','r','w','rw','wr','i','rwi','wri','c','b','s'], default="w")
 	parser.add_argument("-q","--quiet", action="store_true", help="Suppress output, default True in new version",default=True)
 	parser.add_argument("-v","--verbose", action="store_true", help="Verbose output",default=False)
 	parser.add_argument("-S",'--stealth', action="store_true", help="Suppress verbose output and verbose log file",default=False)
@@ -731,6 +1297,10 @@ def climain():
 	parser.add_argument('-addr',"--message_end_point_address", type=str, help="The end point address of the message")
 	parser.add_argument('--threshold_to_report_anomaly', type=int, help="The threshold to report if 1 percent high is higher then 1 percent low * <threshold_to_report_anomaly>",default=0)
 	parser.add_argument('-bt',"--benchmark_time", type=int, help="The time in seconds to run the benchmark for file generation speed",default=5)
+	parser.add_argument("-wtpt", "--write_target_throughput", type=str,
+		help="Target sync write throughput (e.g. 500m, 2g). Auto-tunes the first write pass.")
+	parser.add_argument("-rtpt", "--read_target_throughput", type=str,
+		help="Target sync read throughput (e.g. 500m, 2g). Auto-tunes the first read pass.")
 	parser.add_argument("-V","--version", action="version", version=f"%(prog)s {version} @ {COMMIT_DATE} with teeLogger {Tee_Logger.version} {' and numpy ' if numpy_available else ''} by pan@zopyr.us")
 	args = parser.parse_args()
 	# if we are on windows, set the log directory to the current directory
@@ -781,6 +1351,21 @@ def climain():
 				tl.teelog(f"Adjusted -t/-pc to {args.process_count} to fit total_size {format_bytes(total_size)}B", level='info')
 
 	modes = parse_modes(args.mode)
+	write_target = None
+	read_target = None
+	if args.write_target_throughput is not None:
+		if not supports_write_throughput_tuning(modes):
+			raise ValueError("-wtpt/--write_target_throughput requires a mode with a write pass (write, rw, comprehensive, simultaneous, etc.)")
+		write_target = parse_size_arg(args.write_target_throughput, unitless_as_mb=True)
+		if write_target <= 0:
+			raise ValueError("write_target_throughput must be greater than 0")
+	if args.read_target_throughput is not None:
+		if not supports_read_throughput_tuning(modes):
+			raise ValueError("-rtpt/--read_target_throughput requires a mode with a read pass (read, rw, comprehensive, simultaneous, etc.)")
+		read_target = parse_size_arg(args.read_target_throughput, unitless_as_mb=True)
+		if read_target <= 0:
+			raise ValueError("read_target_throughput must be greater than 0")
+	throughput_tuning = write_target is not None or read_target is not None
 	# if no directory is provided, use the current directory
 	if args.directory is None:
 		args.directory = [os.getcwd()]
@@ -789,6 +1374,10 @@ def climain():
 		tl.info(f'File size: {format_bytes(args.file_size)}B')
 		tl.info(f'Number of files: {args.file_count}')
 		tl.info(f'Number of processes: {args.process_count}')
+		if write_target is not None:
+			tl.info(f'Write target throughput: {format_bytes(write_target)}B/s')
+		if read_target is not None:
+			tl.info(f'Read target throughput: {format_bytes(read_target)}B/s')
 		if 'benchmark' not in modes and len(modes) == 1:
 			tl.info(f'Writing to {", ".join(args.directory)}')
 	else:
@@ -796,9 +1385,19 @@ def climain():
 		tl.teeprint(f'File size: {format_bytes(args.file_size)}B')
 		tl.teeprint(f'Number of files: {args.file_count}')
 		tl.teeprint(f'Number of processes: {args.process_count}')
+		if write_target is not None:
+			tl.teeprint(f'Write target throughput: {format_bytes(write_target)}B/s')
+		if read_target is not None:
+			tl.teeprint(f'Read target throughput: {format_bytes(read_target)}B/s')
 		if 'benchmark' not in modes and len(modes) == 1:
 			tl.teeprint(f'Writing to {", ".join(args.directory)}')
-	main(args.file_size, args.file_count, args.process_count, args.directory,modes,args.quiet,args.zeros,tl=tl,stealth=args.stealth,message_end_point_address=args.message_end_point_address,no_report=args.no_report,threshold_to_report_anomaly=args.threshold_to_report_anomaly,benchmarkTime=args.benchmark_time)
+	if throughput_tuning:
+		tune_for_targets(args.file_size, args.file_count, args.process_count, args.directory, modes,
+			args.quiet, args.zeros, tl, write_target, read_target, stealth=args.stealth,
+			message_end_point_address=args.message_end_point_address, no_report=args.no_report,
+			threshold_to_report_anomaly=args.threshold_to_report_anomaly, benchmarkTime=args.benchmark_time)
+	else:
+		main(args.file_size, args.file_count, args.process_count, args.directory,modes,args.quiet,args.zeros,tl=tl,stealth=args.stealth,message_end_point_address=args.message_end_point_address,no_report=args.no_report,threshold_to_report_anomaly=args.threshold_to_report_anomaly,benchmarkTime=args.benchmark_time)
 	
 if __name__ == "__main__":
 	climain()
