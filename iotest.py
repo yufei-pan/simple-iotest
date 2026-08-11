@@ -18,8 +18,8 @@ try:
 except ImportError:
 	numpy_available = False
 
-version = '3.66.0'
-COMMIT_DATE = '2026-06-08'
+version = '3.66.1'
+COMMIT_DATE = '2026-08-11'
 __version__ = version
 
 # --------------------------------
