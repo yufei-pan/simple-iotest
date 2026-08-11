@@ -27,4 +27,5 @@ iotest = "iotest:climain"
 [dependency-groups]
 dev = [
     "memory-profiler>=0.61.0",
+    "pytest>=7.0.0",
 ]
