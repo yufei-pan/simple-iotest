@@ -105,3 +105,22 @@ def test_almost_urandom_length(iotest_mod):
     buf = iotest_mod.almost_urandom(1000)
     assert isinstance(buf, (bytes, bytearray))
     assert len(buf) == 1000
+
+
+def test_create_read_move_stat_index(iotest_mod, tmp_path):
+    content = b"\x00" * 64
+    src = tmp_path / "a.bin"
+    dst = tmp_path / "b.bin"
+    iotest_mod.create_file(str(src), content, len(content), quiet=True)
+    assert src.is_file()
+    assert src.stat().st_size == 64
+    iotest_mod.read_file(str(src), content, len(content), quiet=True)
+    iotest_mod.stat_file(str(src), quiet=True)
+    iotest_mod.move_file(str(src), str(dst), quiet=True)
+    assert not src.exists()
+    assert dst.is_file()
+    # index_file creates `<name>.index`, stats it, then rmdir — no leftovers
+    before = set(tmp_path.iterdir())
+    iotest_mod.index_file(str(tmp_path / "idx_target"), quiet=True)
+    after = set(tmp_path.iterdir())
+    assert after == before
