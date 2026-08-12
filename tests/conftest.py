@@ -50,6 +50,42 @@ def tiny():
     }
 
 
+class _RecTeeLogger:
+    """Minimal tee-logger double that records every rendering call.
+
+    `main()` and the tuning functions only need teeprint/teeerror/teelog/info
+    plus the `currentDateTime` / `logFileName` attributes; nothing here connects
+    to real files, terminals, or logs.
+    """
+
+    def __init__(self):
+        self.printed = []
+        self.logged = []
+        self.currentDateTime = "rec_tl_run"
+        self.logFileName = "rec_tl.log"
+
+    def teeprint(self, msg, *a, **k):
+        self.printed.append(str(msg))
+
+    def teeerror(self, msg, *a, **k):
+        self.printed.append(str(msg))
+
+    def teelog(self, msg, *a, **k):
+        self.logged.append(str(msg))
+
+    def info(self, msg, *a, **k):
+        self.logged.append(str(msg))
+
+    @property
+    def messages(self):
+        return self.printed + self.logged
+
+
+@pytest.fixture
+def rec_tl():
+    return _RecTeeLogger()
+
+
 @pytest.fixture
 def run_main(iotest_mod, make_tl, work_dir, tiny):
     def _run(modes, **overrides):

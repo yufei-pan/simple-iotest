@@ -1253,26 +1253,26 @@ def tune_for_targets(file_size, file_count, process_count, directory, modes, qui
 			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
 			benchmarkTime=benchmarkTime)
 
+def parse_size_arg(size_arg, unitless_as_mb=True):
+	size_arg = str(size_arg).strip().lower()
+	if 'm' in size_arg:
+		return int(float(size_arg.partition('m')[0]) * 1024 * 1024)
+	if 'g' in size_arg:
+		return int(float(size_arg.partition('g')[0]) * 1024 * 1024 * 1024)
+	if 'k' in size_arg:
+		return int(float(size_arg.partition('k')[0]) * 1024)
+	if 't' in size_arg:
+		return int(float(size_arg.partition('t')[0]) * 1024 * 1024 * 1024 * 1024)
+	if 'b' in size_arg and size_arg.partition('b')[0].replace('.', '', 1).isdigit():
+		return int(float(size_arg.partition('b')[0]))
+	if unitless_as_mb:
+		return int(float(size_arg) * 1024 * 1024)
+	return int(float(size_arg))
+
 def climain():
 	default_file_size_str = '30'
 	default_file_count = 50
 	default_process_count = 36
-
-	def parse_size_arg(size_arg, unitless_as_mb=True):
-		size_arg = str(size_arg).strip().lower()
-		if 'm' in size_arg:
-			return int(float(size_arg.partition('m')[0]) * 1024 * 1024)
-		if 'g' in size_arg:
-			return int(float(size_arg.partition('g')[0]) * 1024 * 1024 * 1024)
-		if 'k' in size_arg:
-			return int(float(size_arg.partition('k')[0]) * 1024)
-		if 't' in size_arg:
-			return int(float(size_arg.partition('t')[0]) * 1024 * 1024 * 1024 * 1024)
-		if 'b' in size_arg and size_arg.partition('b')[0].replace('.', '', 1).isdigit():
-			return int(float(size_arg.partition('b')[0]))
-		if unitless_as_mb:
-			return int(float(size_arg) * 1024 * 1024)
-		return int(float(size_arg))
 
 	parser = argparse.ArgumentParser(description="Test total disk bandwidth. Default mode is write (w). Comprehensive mode: write -> move -> stat -> read")
 	parser.add_argument("-fs","--file_size", type=str, help="File size (default:30), defaults to mb, can specify in t(b),g(b),m(b),k(b),b", default=None)

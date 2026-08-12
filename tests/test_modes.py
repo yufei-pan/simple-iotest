@@ -68,3 +68,44 @@ def test_rwi_batch_modes(run_main, iotest_mod):
 def test_threshold_to_report_anomaly_smoke(run_main):
     result = run_main(["write"], threshold_to_report_anomaly=1)
     assert "write" in result["outResults"]
+
+
+# Anomaly gate: with a single file, outResults has one entry so the 1% high and
+# 1% low samples are the same value x, and the condition is `x > x * threshold`.
+# That makes the branch deterministic: threshold < 1 always fires, >= 1 never does.
+
+
+def _run_with_anomaly_threshold(iotest_mod, work_dir, rec_tl, threshold):
+    return iotest_mod.main(
+        1024,  # file_size
+        1,     # file_count
+        1,     # process_count
+        str(work_dir),
+        ["write"],
+        True,  # quiet
+        True,  # zeros
+        tl=rec_tl,
+        no_report=True,
+        threshold_to_report_anomaly=threshold,
+        benchmarkTime=1,
+    )
+
+
+def test_anomaly_warning_reported_for_sub_unit_threshold(iotest_mod, work_dir, rec_tl):
+    _run_with_anomaly_threshold(iotest_mod, work_dir, rec_tl, 0.5)
+    report = "\n".join(rec_tl.printed)
+    assert "1% high is too high compared to 1% low" in report
+    assert "threshold is 0.5" in report
+
+
+def test_anomaly_warning_not_reported_at_threshold_one(iotest_mod, work_dir, rec_tl):
+    # threshold=1 with a single sample: high == low so x > x*1 is false
+    _run_with_anomaly_threshold(iotest_mod, work_dir, rec_tl, 1)
+    report = "\n".join(rec_tl.printed)
+    assert "1% high is too high compared to 1% low" not in report
+
+
+def test_anomaly_disabled_at_zero_threshold(iotest_mod, work_dir, rec_tl):
+    _run_with_anomaly_threshold(iotest_mod, work_dir, rec_tl, 0)
+    report = "\n".join(rec_tl.printed)
+    assert "1% high is too high compared to 1% low" not in report

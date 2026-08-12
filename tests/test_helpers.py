@@ -1,7 +1,12 @@
 import math
 import os
+import sys
+from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import iotest as iotest_module  # noqa: E402
 
 
 def test_version_string(iotest_mod):
@@ -124,3 +129,81 @@ def test_create_read_move_stat_index(iotest_mod, tmp_path):
     iotest_mod.index_file(str(tmp_path / "idx_target"), quiet=True)
     after = set(tmp_path.iterdir())
     assert after == before
+
+
+@pytest.mark.parametrize(
+    "arg,expected",
+    [
+        ("1m", 1 * 1024 * 1024),
+        ("500m", 500 * 1024 * 1024),
+        ("1.5m", int(1.5 * 1024 * 1024)),
+        ("2g", 2 * 1024 ** 3),
+        ("3k", 3 * 1024),
+        ("1t", 1024 ** 4),
+        ("64b", 64),
+        ("1.5b", 1),
+        (" 2G ", 2 * 1024 ** 3),  # whitespace + case-insensitive
+        ("30", 30 * 1024 * 1024),  # unitless defaults to MB
+    ],
+)
+def test_parse_size_arg_units(iotest_mod, arg, expected):
+    assert iotest_mod.parse_size_arg(arg) == expected
+
+
+@pytest.mark.parametrize(
+    "arg,expected",
+    [
+        ("30", 30),  # unitless_as_mb=False -> raw bytes
+        ("100", 100),
+        ("0", 0),
+        ("1024", 1024),
+    ],
+)
+def test_parse_size_arg_unitless_raw(iotest_mod, arg, expected):
+    assert iotest_mod.parse_size_arg(arg, unitless_as_mb=False) == expected
+
+
+def test_parse_size_arg_negative_raises_valueerror(iotest_mod):
+    with pytest.raises(ValueError):
+        iotest_mod.parse_size_arg("not-a-size")
+    with pytest.raises(ValueError):
+        iotest_mod.parse_size_arg("abc")
+    with pytest.raises(ValueError):
+        iotest_mod.parse_size_arg("12z34")
+
+
+@pytest.mark.parametrize(
+    "level",
+    ["info", "debug", "warning", "error", "critical", "ok", "okgreen", "okblue", "okcyan", "bogus"],
+)
+def test_print_with_color_emits_message(iotest_mod, capsys, level):
+    iotest_mod.printWithColor("hello-print", level)
+    captured = capsys.readouterr().out
+    assert "hello-print" in captured
+
+
+@pytest.mark.parametrize(
+    "level,marker",
+    [
+        ("warning", iotest_module.bcolors.warning),
+        ("error", iotest_module.bcolors.warning),
+        ("critical", iotest_module.bcolors.critical),
+        ("ok", iotest_module.bcolors.OKGREEN),
+        ("okgreen", iotest_module.bcolors.OKGREEN),
+        ("okblue", iotest_module.bcolors.OKBLUE),
+        ("okcyan", iotest_module.bcolors.OKCYAN),
+        ("debug", iotest_module.bcolors.debug),
+        ("bogus", iotest_module.bcolors.info),
+    ],
+)
+def test_print_with_color_ansi_markers(iotest_mod, capsys, level, marker):
+    # error uses the warning colour; bogus falls through to the info branch
+    iotest_mod.printWithColor("x", level)
+    assert marker in capsys.readouterr().out
+
+
+def test_worker_log_quiet_suppresses(iotest_mod, capsys):
+    iotest_mod.worker_log("silenced", quiet=True)
+    assert capsys.readouterr().out == ""
+    iotest_mod.worker_log("visible", quiet=False)
+    assert "visible" in capsys.readouterr().out
