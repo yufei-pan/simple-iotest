@@ -22,7 +22,10 @@ pipx install simple-iotest
 Run the script with:
 ```bash
 iotest [options] [modes]
+simple-iotest [options] [modes]
 ```
+
+`simple-iotest` is the same command as `iotest` (so `uvx simple-iotest` works).
 
 Default mode is **write** (`w`) when no mode is specified.
 

@@ -8,6 +8,15 @@ import iotest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "iotest.py"
+PYPROJECT = ROOT / "pyproject.toml"
+
+
+def test_package_name_console_script_alias():
+    # uvx / pipx invoke the console script whose name matches the package.
+    text = PYPROJECT.read_text()
+    scripts = text.split("[project.scripts]", 1)[1].split("[", 1)[0]
+    assert 'iotest = "iotest:climain"' in scripts
+    assert 'simple-iotest = "iotest:climain"' in scripts
 
 
 def run_iotest(args, cwd=None):

@@ -1,6 +1,6 @@
 [project]
 name = "simple-iotest"
-version = "3.66.1"
+version = "3.67.0"
 description = "A dead simple iotest for HPC environments"
 readme = "README.md"
 requires-python = ">=3.6"
@@ -20,6 +20,7 @@ classifiers = [
 
 [project.scripts]
 iotest = "iotest:climain"
+simple-iotest = "iotest:climain"
 
 [project.urls]
 "Homepage" = "https://github.com/yufei-pan/simple-iotest"
