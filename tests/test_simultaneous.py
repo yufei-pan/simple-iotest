@@ -45,6 +45,18 @@ def test_simultaneous_multi_directory(iotest_mod, tmp_path, make_tl, tiny):
     assert list(d2.glob(".iotest_simul_*")) == []
 
 
+def test_simultaneous_after_batch_write_uses_role_worker_counts(run_main, iotest_mod):
+    # batch write stores "write", then simultaneous collides and both become write_1/write_2;
+    # write_2 must keep the simultaneous writer count, not fall back to process_count
+    result = run_main(["write", "simultaneous"], process_count=3, file_count=2)
+    assert set(result["outResults"]) == {"write_1", "write_2", "read"}
+    assert result["mode_process_counts"] == {"write_1": 3, "write_2": 1, "read": 2}
+    for mode in result["outResults"]:
+        assert len(result["outResults"][mode]) == 2 * result["mode_process_counts"][mode]
+    expected = (1024 * 2 * 1) / result["totalTime"]["write_2"]
+    assert iotest_mod.measure_role_bandwidth(result, "write_2") == pytest.approx(expected)
+
+
 def test_simultaneous_requires_pc_ge_2(run_main):
     with pytest.raises(ValueError, match="process_count >= 2"):
         run_main(["simultaneous"], process_count=1)

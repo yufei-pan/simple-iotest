@@ -89,6 +89,25 @@ def test_sync_and_measure_bandwidth(iotest_mod):
     assert iotest_mod.sync_bandwidth_bps(out, total, 1024, 2, 2, "read") is None
 
 
+def test_calc_iops(iotest_mod):
+    # 4 ops across 2 processes: 1.0 s of call time per process -> 4 call IOPS
+    call_iops, sync_iops = iotest_mod.calc_iops([0.5, 0.5, 0.5, 0.5], 2.0, 2)
+    assert call_iops == pytest.approx(4.0)
+    assert sync_iops == pytest.approx(2.0)
+
+
+def test_calc_iops_zero_times_are_none(iotest_mod):
+    assert iotest_mod.calc_iops([0.0, 0.0], 0, 1) == (None, None)
+    assert iotest_mod.calc_iops([0.1], None, 1) == (pytest.approx(10.0), None)
+    assert iotest_mod.calc_iops([0.1], 1.0, 0) == (None, pytest.approx(1.0))
+
+
+def test_format_iops(iotest_mod):
+    assert iotest_mod.format_iops(None) == "N/A"
+    assert iotest_mod.format_iops(1234567.891) == "1,234,567.89"
+    assert iotest_mod.format_iops(3.5) == "3.50"
+
+
 def test_supports_throughput_tuning(iotest_mod):
     assert iotest_mod.supports_write_throughput_tuning(["write"]) is True
     assert iotest_mod.supports_write_throughput_tuning(["index"]) is False

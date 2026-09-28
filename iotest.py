@@ -565,6 +565,20 @@ def measure_role_bandwidth(result, role):
 		result['process_count'], role,
 		result.get('mode_process_counts'))
 
+def calc_iops(op_times, total_time, process_count):
+	# call: ops per second of per-process time spent inside the op calls
+	# sync: ops per second of wall-clock time for the whole pass
+	op_count = len(op_times)
+	total_p_time = sum(op_times) / process_count if process_count > 0 else 0
+	call_iops = op_count / total_p_time if total_p_time > 0 else None
+	sync_iops = op_count / total_time if total_time and total_time > 0 else None
+	return call_iops, sync_iops
+
+def format_iops(iops):
+	if iops is None:
+		return 'N/A'
+	return f"{iops:,.2f}"
+
 def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None):
 	if tuning_attempt:
 		no_report = True
@@ -687,7 +701,6 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 					read_count = process_count - write_count
 				if write_count < 1 or read_count < 1:
 					raise ValueError("simultaneous mode requires at least 1 writer and 1 reader")
-				mode_process_counts = {'write': write_count, 'read': read_count}
 				run_id = simultaneous_run_id or tl.currentDateTime
 				layout_padding_pc = simultaneous_layout_process_count or process_count
 				layout_worker_count = simultaneous_layout_workers if simultaneous_layout_workers is not None else process_count
@@ -724,6 +737,8 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 					addToDicWithoutOverwrite(outResults, 'read', list(read_results))
 					addToDicWithoutOverwrite(totalTime, 'write', write_sync_time)
 					addToDicWithoutOverwrite(totalTime, 'read', read_sync_time)
+					addToDicWithoutOverwrite(mode_process_counts, 'write', write_count)
+					addToDicWithoutOverwrite(mode_process_counts, 'read', read_count)
 				finally:
 					if not simultaneous_skip_cleanup:
 						cleanup_simultaneous_tree(directories, run_id, layout_padding_pc)
@@ -758,6 +773,8 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 				addToDicWithoutOverwrite(outResults,'move',moves)
 				addToDicWithoutOverwrite(outResults,'stat',stats)
 				addToDicWithoutOverwrite(outResults,'read',reads)
+				for key in ('write','move','stat','read'):
+					addToDicWithoutOverwrite(mode_process_counts,key,process_count)
 				if sumAllTime > 0:
 					addToDicWithoutOverwrite(totalTime,'write',totalEndTime * (sumWTime / sumAllTime))
 					addToDicWithoutOverwrite(totalTime,'move',totalEndTime * (sumMTime / sumAllTime))
@@ -771,6 +788,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			else:
 				addToDicWithoutOverwrite(outResults,mode,list(results))
 				addToDicWithoutOverwrite(totalTime,mode,totalEndTime)
+				addToDicWithoutOverwrite(mode_process_counts,mode,process_count)
 	# write the outResults to a csv file
 	if not no_report and outResults:
 		dir_str_repr = "_".join([d.replace('/','-').replace('\\','-').replace(':','-').replace('--','-').replace(' ','_') for d in directories])
@@ -809,8 +827,9 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 		one_percent_high_time = outResults[mode][int(len(outResults[mode]) * 0.99)]
 		zero_point_one_percent_high_time = outResults[mode][int(len(outResults[mode]) * 0.999)]
 		highest_time = outResults[mode][-1]
+		effective_pc = mode_process_counts.get(mode, process_count)
+		call_iops, sync_iops = calc_iops(outResults[mode], totalTime.get(mode), effective_pc)
 		if 'write' in mode or 'read' in mode:
-			effective_pc = mode_process_counts.get(mode, process_count)
 			total_size = file_size * file_count * effective_pc
 			total_p_time = sum(outResults[mode]) / effective_pc
 			total_bandwidth = total_size / total_p_time
@@ -820,6 +839,9 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			report.append(f"{mode} bandwidth (sync):\t{format_bytes(total_size / totalTime[mode])}B/s")
 			report.append(f"                       \t{format_bytes(total_size / totalTime[mode] * 8,use_1024_bytes=False)}bps")
 			report.append(f"IO time % (IO wait):   \t{total_p_time / totalTime[mode] * 100:.2f}%")
+		report.append(f"Total {mode} ops:       \t{len(outResults[mode])}")
+		report.append(f"{mode} IOPS (call):     \t{format_iops(call_iops)}")
+		report.append(f"{mode} IOPS (sync):     \t{format_iops(sync_iops)}")
 		report.append(f"Average {mode} time:    \t{avg_time:.4f} s")
 		report.append(f"Median {mode} time:     \t{median_time:.4f} s")
 		report.append(f"1 % low {mode} time:    \t{one_percent_low_time:.4f} s")
@@ -832,9 +854,9 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			report.append(f"Warning | iotest: 1% high is {one_percent_high_time:.4f} s, 1% low is {one_percent_low_time:.4f} s, threshold is {threshold_to_report_anomaly}")
 		if message_end_point_address:
 			if 'write' in mode or 'read' in mode:
-				payload = json.dumps({'content': f"Short Report for {mode} mode: Speed {format_bytes(total_bandwidth)}B/s @ {total_p_time / totalTime[mode] * 100:.2f}% IO time"})
+				payload = json.dumps({'content': f"Short Report for {mode} mode: Speed {format_bytes(total_bandwidth)}B/s, {format_iops(call_iops)} IOPS @ {total_p_time / totalTime[mode] * 100:.2f}% IO time"})
 			else:
-				payload = json.dumps({'content': f"Short Report for {mode} mode: avg {avg_time:.4f} s, median {median_time:.4f} s"})
+				payload = json.dumps({'content': f"Short Report for {mode} mode: {format_iops(call_iops)} IOPS, avg {avg_time:.4f} s, median {median_time:.4f} s"})
 			subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', '-d', payload, message_end_point_address])
 	tl.teeprint('\n'.join(report))
 	# write the report to a file

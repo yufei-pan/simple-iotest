@@ -109,3 +109,34 @@ def test_anomaly_disabled_at_zero_threshold(iotest_mod, work_dir, rec_tl):
     _run_with_anomaly_threshold(iotest_mod, work_dir, rec_tl, 0)
     report = "\n".join(rec_tl.printed)
     assert "1% high is too high compared to 1% low" not in report
+
+
+def _report_value(report, label):
+    for line in report.splitlines():
+        if line.startswith(label):
+            return line.split("\t", 1)[1].strip()
+    raise AssertionError(f"{label!r} not found in report")
+
+
+def _run_report(iotest_mod, work_dir, rec_tl, modes, file_count=3, process_count=2):
+    iotest_mod.main(1024, file_count, process_count, str(work_dir), modes, True, True,
+                    tl=rec_tl, no_report=True, benchmarkTime=1)
+    return "\n".join(rec_tl.printed)
+
+
+@pytest.mark.parametrize(
+    "modes, roles",
+    [
+        (["index"], ["index"]),
+        (["write"], ["write"]),
+        (["comprehensive"], ["write", "move", "stat", "read"]),
+    ],
+)
+def test_report_includes_iops(iotest_mod, work_dir, rec_tl, modes, roles):
+    report = _run_report(iotest_mod, work_dir, rec_tl, modes)
+    for role in roles:
+        # 3 files per process * 2 processes
+        assert _report_value(report, f"Total {role} ops:") == "6"
+        for kind in ("call", "sync"):
+            iops = float(_report_value(report, f"{role} IOPS ({kind}):").replace(",", ""))
+            assert_finite_positive(iops)
