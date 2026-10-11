@@ -24,7 +24,7 @@ try:
 except ImportError:
 	numpy_available = False
 
-version = '3.69.0'
+version = '3.69.1'
 COMMIT_DATE = '2026-10-11'
 __version__ = version
 
