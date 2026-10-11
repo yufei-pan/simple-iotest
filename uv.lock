@@ -433,7 +433,7 @@ wheels = [
 
 [[package]]
 name = "simple-iotest"
-version = "3.68.0"
+version = "3.69.0"
 source = { virtual = "." }
 dependencies = [
     { name = "tee-logger" },
