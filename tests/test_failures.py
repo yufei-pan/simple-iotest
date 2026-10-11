@@ -133,3 +133,12 @@ def test_dead_comprehensive_worker_fails_every_step(run_main, work_dir):
     result = run_main(["comprehensive"], file_count=2)
     assert {key: len(errors) for key, errors in result["failedOps"].items()} == {
         "write": 2, "move": 2, "stat": 2, "read": 2}
+
+
+def test_failed_recreate_reports_the_write_error(iotest_mod, tmp_path, monkeypatch):
+    # read_file recreates a missing file first; if that write fails, its error is the real cause
+    monkeypatch.setattr(iotest_mod, "create_file",
+        lambda *a, **k: (None, "OSError: [Errno 28] No space left on device"))
+    op = iotest_mod.op_time(iotest_mod.read_file(str(tmp_path / "missing.bin"), b"\x00" * 64, 64, quiet=True))
+    assert isinstance(op, str)
+    assert "No space left on device" in op

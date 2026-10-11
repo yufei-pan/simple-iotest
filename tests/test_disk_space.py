@@ -93,12 +93,13 @@ def test_tuning_with_cleanup_prints_no_cleanup_hint(tmp_path):
     assert "--cleanup" not in proc.stdout
 
 
-def test_leftover_hint_counts_files_from_every_counter_padding(iotest_mod, work_dir):
-    for pc in (12, 3):
+def test_leftover_hint_counts_only_the_given_runs(iotest_mod, work_dir):
+    for pc in (12, 3, 9):
         for _, _, path in iotest_mod.worker_files([str(work_dir)], pc, 1):
             Path(path).parent.mkdir(exist_ok=True)
             Path(path).write_bytes(b"x")
-    assert "Left 15 test files" in iotest_mod.leftover_hint([str(work_dir)], 12, 1)
+    # runs at 12 and 3 own 00..11 and 0..2; 3..8 belong to the -pc 9 run
+    assert "Left 15 test files" in iotest_mod.leftover_hint([str(work_dir)], [12, 3], 1)
 
 
 def test_cleanup_reaches_tuning_runs(iotest_mod, work_dir, rec_tl, tiny):
@@ -161,14 +162,15 @@ def test_tuning_cleans_up_only_after_the_last_attempt(run_main, iotest_mod, work
     assert temp_files(work_dir) == []
 
 
-def test_cleanup_after_tuning_covers_every_counter_padding(iotest_mod, work_dir):
-    # attempts at -pc 12 name worker dirs 00..11, attempts at -pc 3 name them 0..2
-    for pc in (12, 3):
-        for _, _, path in iotest_mod.worker_files([str(work_dir)], pc, 1):
-            Path(path).parent.mkdir(exist_ok=True)
-            Path(path).write_bytes(b"x")
-    iotest_mod.cleanup_all_worker_files([str(work_dir)], 12, 1)
-    assert list(Path(work_dir).iterdir()) == []
+def test_tuning_cleanup_keeps_files_of_other_runs(iotest_mod, work_dir, rec_tl, tiny):
+    # an earlier -pc 9 run left 0..8/temp_*.bin; tuning from -pc 12 runs attempts at 12 and 1,
+    # so -cl may remove 00..11 and 0 (rewritten by the pc=1 attempt) but not 1..8
+    for _, _, path in iotest_mod.worker_files([str(work_dir)], 9, 2):
+        Path(path).parent.mkdir(exist_ok=True)
+        Path(path).write_bytes(b"x" * 1024)
+    iotest_mod.tune_for_targets(1024, 2, 12, str(work_dir), ["write"], True, True, rec_tl,
+        1, None, no_report=True, benchmarkTime=tiny["benchmarkTime"], cleanup=True)
+    assert temp_files(work_dir) == [f"{c}/temp_{i}.bin" for c in range(1, 9) for i in (1, 2)]
 
 
 def mountinfo_line(mount_point, fstype, source):
@@ -229,17 +231,23 @@ def test_simultaneous_attempts_rely_on_the_tuners_upfront_check(iotest_mod, work
     assert len(result["outResults"]["write"]) == 1
 
 
-def test_rewrites_on_copy_on_write_filesystems_are_not_reclaimable(run_main, work_dir, iotest_mod, monkeypatch):
-    # on btrfs/ZFS a snapshot can keep the old blocks of a rewritten file allocated
+def test_rewrites_on_copy_on_write_filesystems_warn_instead_of_refusing(run_main, work_dir, iotest_mod, monkeypatch, rec_tl):
+    # on btrfs/ZFS a rewrite frees the old blocks only if no snapshot holds them: a run that
+    # fits only under that assumption goes ahead with a warning; one that cannot fit is refused
     run_main(["write"])
     lines = [ROOT, mountinfo_line(os.path.realpath(work_dir), "btrfs", "/dev/sdb")]
     monkeypatch.setattr(iotest_mod, "read_mountinfo", lambda: lines)
     fake_free(iotest_mod, monkeypatch, 0)
+    result = run_main(["write"], tl=rec_tl)
+    assert len(result["outResults"]["write"]) == 1
+    assert any("snapshot" in m for m in rec_tl.messages)
+    # reading existing full-size files rewrites nothing, so it needs no space
+    assert len(run_main(["read"])["outResults"]["read"]) == 1
+    # without files to rewrite there is nothing to reclaim
+    for path in Path(work_dir).rglob("temp_*.bin"):
+        path.unlink()
     with pytest.raises(SystemExit):
         run_main(["write"])
-    # reading existing full-size files rewrites nothing, so it still needs no space
-    result = run_main(["read"])
-    assert len(result["outResults"]["read"]) == 1
 
 
 def test_each_directory_is_checked_against_its_own_free_space(run_main, tmp_path, iotest_mod, monkeypatch):

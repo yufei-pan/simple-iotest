@@ -98,12 +98,17 @@ def test_simultaneous_reader_reuses_one_read_buffer(iotest_mod, work_dir, monkey
         (["write", "read"], 2),
         (["comprehensive"], 2),
         (["random"], 2),
-        (["simultaneous"], 2),
     ],
 )
 def test_memory_copies_per_mode(iotest_mod, modes, copies):
     # every worker holds its file content; workers that also read hold a read buffer too
-    assert iotest_mod.memory_copies(modes) == copies
+    assert iotest_mod.memory_copies(modes, 4) == copies
+
+
+@pytest.mark.parametrize("write_count,copies", [(None, 1.5), (1, 1.75), (3, 1.25)])
+def test_simultaneous_memory_copies_follow_the_split(iotest_mod, write_count, copies):
+    # writers hold one buffer, readers two; averaged over 4 workers
+    assert iotest_mod.memory_copies(["simultaneous"], 4, write_count) == copies
 
 
 @pytest.mark.parametrize("modes,expected_pc", [(["read"], 2), (["write"], 4)])
@@ -118,10 +123,10 @@ def test_memory_guard_counts_read_buffers(run_main, iotest_mod, monkeypatch, mod
 
 
 def test_memory_cut_keeps_at_least_one_simultaneous_reader(run_main, iotest_mod, monkeypatch):
-    # 7400 B fits 7400 // (1024 x 2 x 1.2) = 3 processes, but 3 writers were asked for;
-    # the split must shrink to 2 writers + 1 reader instead of failing with 0 readers
+    # 3 writers + 1 reader average 1.25 copies: 4600 // (1024 x 1.25 x 1.2) = 2 processes fit,
+    # fewer than the 3 writers asked for; the split must shrink to 1 + 1, not fail with 0 readers
     monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
-    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (7400, 0))
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (4600, 0))
     result = run_main(["simultaneous"], process_count=4, simultaneous_write_count=3)
-    assert result["process_count"] == 3
-    assert result["mode_process_counts"] == {"write": 2, "read": 1}
+    assert result["process_count"] == 2
+    assert result["mode_process_counts"] == {"write": 1, "read": 1}

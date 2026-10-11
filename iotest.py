@@ -352,7 +352,10 @@ def read_file(file_name, file_content, file_size, quiet=False, buffer=None, befo
 			worker_log(f"File {file_name} does not exist or size is wrong, creating it...", level='error', quiet=quiet)
 			if before_recreate is not None:
 				before_recreate()
-			create_file(file_name, file_content, file_size, quiet=quiet)
+			created = create_file(file_name, file_content, file_size, quiet=quiet)
+			if created[0] is None:
+				# report why the file is missing, not the read error that would follow
+				return None, f"recreating missing {file_name}: {created[1]}"
 
 		with open(file_name, "rb", buffering=0) as f:
 			try:
@@ -464,7 +467,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		if stamp_files:
 			stamp_unique(file_content, stamp_id, i)
 		# -u read: stamp a file only when read_file is about to recreate it
-		before_recreate = functools.partial(stamp_unique, file_content, stamp_id, i) if unique else None
+		before_recreate = functools.partial(stamp_unique, file_content, stamp_id, i) if unique and mode == 'read' else None
 		i = str(i+1).zfill(len(str(file_count)))
 		if mode == 'write':
 			write_time = op_time(create_file(file_name, file_content, file_size, quiet=quiet))
@@ -538,18 +541,21 @@ def space_needed(modes, file_size, file_count, process_count, directories,
 	# peak bytes each directory receives during the run
 	if mountinfo_lines is None:
 		mountinfo_lines = read_mountinfo()
+	# needed assumes a rewrite frees the old file first; cow_extra is what copy-on-write
+	# filesystems need on top when a snapshot keeps the old blocks allocated
 	needed = {d: 0 for d in directories}
+	cow_extra = {d: 0 for d in directories}
 	rewrites = 'write' in modes or 'random' in modes
 	if rewrites or 'read' in modes:
-		# these files stay. Rewriting one frees its old size first, except on copy-on-write
-		# filesystems, where a snapshot can keep the old blocks allocated; read only
-		# recreates a missing or wrong-size file, at full size, before reading it
+		# these files stay; read only recreates a missing or wrong-size file, at full size
 		cow = {d: (find_mount(os.path.realpath(d), mountinfo_lines) or ('',))[0] in COPY_ON_WRITE_FILESYSTEMS
 			for d in directories}
 		for directory, _, path in worker_files(directories, process_count, file_count):
 			existing = existing_size(path)
 			if rewrites:
-				needed[directory] += file_size if cow[directory] else file_size - existing
+				needed[directory] += file_size - existing
+				if cow[directory]:
+					cow_extra[directory] += existing
 			elif existing != file_size:
 				needed[directory] += file_size
 	# comprehensive deletes each file after reading it and simultaneous removes its
@@ -569,7 +575,7 @@ def space_needed(modes, file_size, file_count, process_count, directories,
 				simul[directories[counter % len(directories)]] += file_size * file_count
 		for d in directories:
 			transient[d] = max(transient[d], simul[d])
-	return {d: needed[d] + transient[d] for d in directories}
+	return {d: needed[d] + transient[d] for d in directories}, cow_extra
 
 def space_pool(directory, mountinfo_lines):
 	# directories drawing on the same free space; btrfs subvolumes and ZFS datasets
@@ -583,7 +589,7 @@ def space_pool(directory, mountinfo_lines):
 			return ('zfs', source.split('/')[0])
 	return ('dev', os.stat(directory).st_dev)
 
-def check_free_space(needed_by_dir, tl, mountinfo_lines=None):
+def check_free_space(needed_by_dir, tl, mountinfo_lines=None, cow_extra=None):
 	if mountinfo_lines is None:
 		mountinfo_lines = read_mountinfo()
 	spare = f"keeping {100 - FREE_SPACE_MARGIN * 100:.0f}% spare"
@@ -596,6 +602,10 @@ def check_free_space(needed_by_dir, tl, mountinfo_lines=None):
 			tl.teeerror(f"Not enough free space for {directory}: this run needs {format_bytes(needed)}B, "
 				f"{format_bytes(free)}B free ({spare}).")
 			enough = False
+		elif cow_extra and needed + cow_extra.get(directory, 0) > free * FREE_SPACE_MARGIN:
+			tl.teelog(f"Warning: {directory} is copy-on-write; rewriting the existing test files frees their "
+				f"old blocks only if no snapshot holds them. If one does, this run needs up to "
+				f"{format_bytes(needed + cow_extra[directory])}B ({format_bytes(free)}B free).", level='warning')
 		pool = pools.setdefault(space_pool(directory, mountinfo_lines), [0, 0, []])
 		pool[0] += needed
 		pool[1] = max(pool[1], free)
@@ -610,13 +620,10 @@ def check_free_space(needed_by_dir, tl, mountinfo_lines=None):
 		tl.teeerror("Nothing was written. Reduce -fs, -fc or -pc (or use -ts) and try again.")
 	return enough
 
-def all_worker_files(directories, max_process_count, file_count):
-	# worker_files() for every padding width: tuning attempts and the memory check run at
-	# smaller process counts, and the counter padding follows the count (00..35 at -pc 36,
-	# 0..8 at -pc 9)
-	for width in range(1, len(str(max_process_count)) + 1):
-		for entry in worker_files(directories, min(max_process_count, 10 ** width - 1), file_count):
-			yield entry
+# process counts main() ran plain workers at in this process: -cl after tuning and the
+# leftover hint cover exactly the files this run wrote, not other runs' files that
+# happen to use the same names
+worker_runs = set()
 
 def remove_worker_files(entries):
 	# remove only these files, then their worker dirs if now empty
@@ -636,12 +643,9 @@ def remove_worker_files(entries):
 def cleanup_worker_files(directories, process_count, file_count):
 	remove_worker_files(worker_files(directories, process_count, file_count))
 
-def cleanup_all_worker_files(directories, max_process_count, file_count):
-	remove_worker_files(all_worker_files(directories, max_process_count, file_count))
-
-def leftover_hint(directories, max_process_count, file_count):
-	paths = sorted({path for _, _, path in all_worker_files(directories, max_process_count, file_count)
-		if os.path.isfile(path)})
+def leftover_hint(directories, process_counts, file_count):
+	paths = sorted({path for process_count in process_counts
+		for _, _, path in worker_files(directories, process_count, file_count) if os.path.isfile(path)})
 	if not paths:
 		return None
 	total = sum(existing_size(path) for path in paths)
@@ -855,9 +859,15 @@ def send_short_reports(message_end_point_address, short_reports, tl):
 			tl.teeerror(f"Failed to send short report to {host}: {e}{skipped_note}")
 			return
 
-def memory_copies(modes):
+def memory_copies(modes, process_count=1, simultaneous_write_count=None):
 	# every worker holds its file content; workers that also read hold a read buffer too
-	return 2 if any(mode in ('read', 'random', 'comprehensive', 'simultaneous') for mode in modes) else 1
+	if any(mode in ('read', 'random', 'comprehensive') for mode in modes):
+		return 2
+	if 'simultaneous' in modes and process_count > 0:
+		# writers hold one copy, readers two
+		writers = simultaneous_write_count if simultaneous_write_count is not None else process_count // 2
+		return (writers + 2 * (process_count - writers)) / process_count
+	return 1
 
 def read_meminfo():
 	# (MemAvailable, SwapFree) in bytes, -1 when unknown
@@ -964,7 +974,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 	failedOps = {}
 	totalTime = {}
 	mode_process_counts = {}
-	memoryPerProcess = file_size * memory_copies(modes) * 1.2
+	memoryPerProcess = file_size * memory_copies(modes, process_count, simultaneous_write_count) * 1.2
 	estimatedTotalMemory = memoryPerProcess * process_count
 	if modes == ['benchmark']:
 		file_count = 0
@@ -987,10 +997,10 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 		simultaneous_write_count = process_count - 1
 	estimatedTotalMemory = memoryPerProcess * process_count
 	# the disk check needs the final process_count, but runs before the 16 s memory pause
-	needed = space_needed(modes, file_size, file_count, process_count, directories,
+	needed, cow_extra = space_needed(modes, file_size, file_count, process_count, directories,
 		simultaneous_write_count=simultaneous_write_count, layout_worker_count=simultaneous_layout_workers,
 		skip_layout=simultaneous_skip_layout, mountinfo_lines=mountinfo)
-	if not check_free_space(needed, tl, mountinfo):
+	if not check_free_space(needed, tl, mountinfo, cow_extra=None if tuning_attempt else cow_extra):
 		sys.exit(1)
 	if phyFreeMemory > 0 and estimatedTotalMemory > phyFreeMemory * 0.9:
 		tl.teeerror("Estimated total memory usage is more than 90% of the total non swap available memory.")
@@ -1247,6 +1257,8 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			f.write('\n'.join(report))
 		tl.teeprint(f"Report written to {report_file_name}")
 		print(f"Log file: {tl.logFileName}")
+	if any(mode in ('write', 'read', 'random', 'comprehensive', 'index') for mode in modes):
+		worker_runs.add(process_count)
 	if cleanup:
 		cleanup_worker_files(directories, process_count, file_count)
 	if message_end_point_address and short_reports:
@@ -1491,7 +1503,7 @@ def tune_simultaneous(file_size, file_count, process_count, directory, modes, qu
 		return True
 	# the layout is written here, outside main(), so check before it; the split
 	# can move to max_pc - 1 writers while tuning
-	needed = space_needed(['simultaneous'], file_size, file_count, max_pc, directories,
+	needed, _ = space_needed(['simultaneous'], file_size, file_count, max_pc, directories,
 		simultaneous_write_count=max_pc - 1, layout_worker_count=layout_workers)
 	if not check_free_space(needed, tl):
 		sys.exit(1)
@@ -1650,6 +1662,7 @@ def tune_for_targets(file_size, file_count, process_count, directory, modes, qui
 		threshold_to_report_anomaly=0, benchmarkTime=5, unique=False, cleanup=False):
 	# clean up once at the end: deleting files between attempts would make the next
 	# read attempt recreate them inside its timed pass
+	worker_runs.clear()
 	try:
 		_tune_for_targets(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 			write_target, read_target, stealth=stealth, message_end_point_address=message_end_point_address,
@@ -1657,7 +1670,8 @@ def tune_for_targets(file_size, file_count, process_count, directory, modes, qui
 			benchmarkTime=benchmarkTime, unique=unique)
 	finally:
 		if cleanup:
-			cleanup_all_worker_files(normalize_directories(directory), process_count, file_count)
+			for run_process_count in worker_runs:
+				cleanup_worker_files(normalize_directories(directory), run_process_count, file_count)
 
 def _tune_for_targets(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 		write_target, read_target, stealth=False, message_end_point_address=None, no_report=False,
@@ -1846,7 +1860,7 @@ def climain():
 	else:
 		result = main(args.file_size, args.file_count, args.process_count, args.directory,modes,args.quiet,args.zeros,tl=tl,stealth=args.stealth,message_end_point_address=args.message_end_point_address,no_report=args.no_report,threshold_to_report_anomaly=args.threshold_to_report_anomaly,benchmarkTime=args.benchmark_time,unique=args.unique_files,cleanup=args.cleanup)
 	if not args.cleanup and ('write' in modes or 'random' in modes or 'read' in modes):
-		hint = leftover_hint(args.directory, args.process_count, args.file_count)
+		hint = leftover_hint(args.directory, sorted(worker_runs), args.file_count)
 		if hint:
 			tl.teeprint(hint)
 	if result is not None and total_failed_ops(result):
