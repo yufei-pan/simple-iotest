@@ -65,6 +65,17 @@ def test_cli_tiny_write(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+def test_cli_exits_nonzero_when_ops_fail(tmp_path):
+    work = tmp_path / "w"
+    blocker = work / "0" / "temp_1.bin"
+    blocker.mkdir(parents=True)
+    proc = run_iotest(
+        ["-fs", "1k", "-fc", "1", "-pc", "1", "-d", str(work), "-nl", "-nr", "-z", "-bt", "1", "write"]
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert str(blocker) in proc.stdout
+
+
 def test_cli_total_size_fills_file_count(tmp_path):
     work = tmp_path / "w"
     work.mkdir()
@@ -87,7 +98,6 @@ def test_cli_total_size_fills_file_count(tmp_path):
         ]
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    out = (proc.stdout or "") + (proc.stderr or "")
     # stealth still logs via tee; with -nl may be quiet — at least success
     assert proc.returncode == 0
 
@@ -138,3 +148,22 @@ def test_cli_simultaneous_dual_d(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert list(d1.glob(".iotest_simul_*")) == []
     assert list(d2.glob(".iotest_simul_*")) == []
+
+
+@pytest.mark.parametrize("flag,value", [("-fc", "0"), ("-pc", "0"), ("-fs", "0"), ("-fc", "-3")])
+def test_cli_rejects_values_below_one(tmp_path, flag, value):
+    work = tmp_path / "w"
+    args = {"-fs": "1k", "-fc": "1", "-pc": "1"}
+    args[flag] = value
+    proc = run_iotest([*sum(args.items(), ()), "-d", str(work), "-nl", "-nr", "-bt", "1", "write"])
+    # argparse's usage error, before anything runs
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert flag in proc.stderr
+    assert not work.exists()
+
+
+def test_cli_accepts_fractional_anomaly_threshold(tmp_path):
+    work = tmp_path / "w"
+    proc = run_iotest(["-fs", "1k", "-fc", "1", "-pc", "1", "-d", str(work), "-nl", "-nr", "-z", "-bt", "1",
+                       "--threshold_to_report_anomaly", "1.5", "write"])
+    assert proc.returncode == 0, proc.stdout + proc.stderr

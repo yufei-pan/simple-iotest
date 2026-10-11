@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 import argparse
 import datetime
+import functools
+import itertools
 import json
 import os
 import random
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
 from multiprocessing import Manager, Process
 
 numpy_available = False
 try:
+	import numpy as np # type: ignore
 	from numpy.random import SFC64, Generator # type: ignore
 	numpy_available = True
 except ImportError:
@@ -229,18 +235,65 @@ def format_bytes(size, use_1024_bytes=None, to_int=False, to_str=False,str_forma
 			print(f"Invalid size: {size}")
 		return 0
 
+GEN_CHUNK = 16 * 2**20
+
 def almost_urandom(n):
-	try:
-		if numpy_available:
-			rng_sf = Generator(SFC64())
-			n_u64 = (n + 7) // 8
-			u64 = rng_sf.bit_generator.random_raw(n_u64)
-			return u64.view('uint8')[:n].tobytes()
+	# fill one buffer chunk by chunk: generating it in one go briefly holds a
+	# second full-size copy (numpy array + .tobytes(), or big int + to_bytes)
+	buf = bytearray(n)
+	view = memoryview(buf)
+	rng_sf = Generator(SFC64()) if numpy_available else None
+	for offset in range(0, n, GEN_CHUNK):
+		size = min(GEN_CHUNK, n - offset)
+		if rng_sf is not None:
+			view[offset:offset + size] = rng_sf.bit_generator.random_raw((size + 7) // 8).view('uint8')[:size]
 		else:
-			return random.getrandbits(8 * n).to_bytes(n, 'big')
-	except OverflowError:
-		return almost_urandom(n // 2) + almost_urandom(n - n // 2)
-	
+			view[offset:offset + size] = random.getrandbits(8 * size).to_bytes(size, 'big')
+	return buf
+
+UNIQUE_STAMP_INTERVAL = 512
+UNIQUE_TAG = struct.Struct('<QQQ')
+
+def stamp_unique(buf, worker_id, file_index):
+	# Workers reuse one buffer for all their files. Overwrite the start of every
+	# 512-byte block with (file, block, worker) so no two blocks of the run match,
+	# which dedup storage could otherwise keep a single physical copy of. The block
+	# number matters with -z, where everything after the tag is zeros. The file
+	# index goes first so a final block shorter than the tag still differs.
+	size = len(buf)
+	full_blocks = size // UNIQUE_STAMP_INTERVAL
+	if numpy_available and full_blocks:
+		tags = np.empty((full_blocks, 3), dtype='<u8')
+		tags[:, 0] = file_index
+		tags[:, 1] = np.arange(full_blocks, dtype='<u8')
+		tags[:, 2] = worker_id
+		blocks = np.frombuffer(buf, dtype=np.uint8)[:full_blocks * UNIQUE_STAMP_INTERVAL]
+		blocks.reshape(full_blocks, UNIQUE_STAMP_INTERVAL)[:, :UNIQUE_TAG.size] = tags.view(np.uint8).reshape(full_blocks, UNIQUE_TAG.size)
+	else:
+		for block in range(full_blocks):
+			UNIQUE_TAG.pack_into(buf, block * UNIQUE_STAMP_INTERVAL, file_index, block, worker_id)
+	tail = size - full_blocks * UNIQUE_STAMP_INTERVAL
+	if tail:
+		start = full_blocks * UNIQUE_STAMP_INTERVAL
+		length = min(tail, UNIQUE_TAG.size)
+		memoryview(buf)[start:start + length] = UNIQUE_TAG.pack(file_index, full_blocks, worker_id)[:length]
+
+def new_stamp_id():
+	# random rather than the PID: PIDs get reused, and with -z a reused one would
+	# rebuild the exact blocks of files an earlier run left on the same storage
+	return int.from_bytes(os.urandom(8), 'little')
+
+def make_file_content(file_size, zeros, unique):
+	if zeros:
+		# stamp_unique edits the buffer in place, so -u needs a mutable one
+		return bytearray(file_size) if unique else b'\x00' * file_size
+	return almost_urandom(file_size)
+
+# A single read()/write() may transfer less than asked: Linux caps one call at
+# this many bytes (MAX_RW_COUNT, 2 GiB - 4 KiB) and macOS rejects anything over
+# INT_MAX with EINVAL, so large files are moved in chunks of at most this size.
+MAX_IO_CHUNK = 0x7ffff000
+
 def create_file(file_name, file_content, file_size, quiet=False):
 	try:
 		with open(file_name, "wb", buffering=0) as f:
@@ -250,15 +303,21 @@ def create_file(file_name, file_content, file_size, quiet=False):
 			except: # noqa: E722
 				worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
 			start_write_time = time.perf_counter()
-			try:
-				if os.name == 'posix':
-					os.writev(f.fileno(), [file_content])
-				else:
-					os.write(f.fileno(), file_content)
-			except: # noqa: E722
-				worker_log('Failed to write using os.writev, trying f.write', level='warning', quiet=quiet)
-				f.write(file_content)
-				f.flush()
+			view = memoryview(file_content)
+			written = 0
+			while written < file_size:
+				chunk = view[written:written + MAX_IO_CHUNK]
+				try:
+					if os.name == 'posix':
+						n = os.writev(f.fileno(), [chunk])
+					else:
+						n = os.write(f.fileno(), chunk)
+				except: # noqa: E722
+					worker_log('Failed to write using os.writev, trying f.write', level='warning', quiet=quiet)
+					n = f.write(chunk)
+				if not n:
+					raise OSError(f"{file_name}: write stopped after {written} of {file_size} bytes")
+				written += n
 			os.fsync(f.fileno())
 			end_write_time = time.perf_counter()
 			return start_write_time,end_write_time
@@ -266,7 +325,7 @@ def create_file(file_name, file_content, file_size, quiet=False):
 		import traceback
 		worker_log(str(e), level='error', quiet=quiet)
 		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return 0,time.perf_counter()
+		return None,f'{type(e).__name__}: {e}'
 
 def move_file(src, dst, quiet=False):
 	start_move_time = time.perf_counter()
@@ -278,15 +337,21 @@ def move_file(src, dst, quiet=False):
 		import traceback
 		worker_log(str(e), level='error', quiet=quiet)
 		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return 0,time.perf_counter()
+		return None,f'{type(e).__name__}: {e}'
 
-def read_file(file_name, file_content, file_size, quiet=False):
-	b=bytearray(file_size)
+def file_needs_recreate(file_name, file_size):
+	return not os.path.isfile(file_name) or os.path.getsize(file_name) != file_size
+
+def read_file(file_name, file_content, file_size, quiet=False, buffer=None, before_recreate=None):
+	# workers pass one reused buffer; a fresh one costs a zero-fill per read (~150 ms/GiB)
+	b = buffer if buffer is not None else bytearray(file_size)
 	# check if file exists and size is correct
 	try:
-		if not os.path.isfile(file_name) or os.path.getsize(file_name) != file_size:
+		if file_needs_recreate(file_name, file_size):
 			# file does not exist or size is wrong, create it
 			worker_log(f"File {file_name} does not exist or size is wrong, creating it...", level='error', quiet=quiet)
+			if before_recreate is not None:
+				before_recreate()
 			create_file(file_name, file_content, file_size, quiet=quiet)
 
 		with open(file_name, "rb", buffering=0) as f:
@@ -296,21 +361,28 @@ def read_file(file_name, file_content, file_size, quiet=False):
 			except:  # noqa: E722
 				worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
 			start_read_time = time.perf_counter()
-			try:
-				if os.name == 'posix':
-					os.readv(f.fileno(),[b])
-				else:
-					f.readinto(b)
-			except:  # noqa: E722
-				worker_log('Failed to read using os.readv, trying f.readinto', level='warning', quiet=quiet)
-				f.readinto(b)
+			view = memoryview(b)
+			got = 0
+			while got < file_size:
+				chunk = view[got:got + MAX_IO_CHUNK]
+				try:
+					if os.name == 'posix':
+						n = os.readv(f.fileno(),[chunk])
+					else:
+						n = f.readinto(chunk)
+				except:  # noqa: E722
+					worker_log('Failed to read using os.readv, trying f.readinto', level='warning', quiet=quiet)
+					n = f.readinto(chunk)
+				if not n:
+					raise OSError(f"{file_name}: read hit end of file after {got} of {file_size} bytes")
+				got += n
 			end_read_time = time.perf_counter()
 			return start_read_time,end_read_time
 	except Exception as e:
 		import traceback
 		worker_log(str(e), level='error', quiet=quiet)
 		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return 0,time.perf_counter()
+		return None,f'{type(e).__name__}: {e}'
 	
 
 def index_file(file_name, quiet=False):
@@ -331,7 +403,7 @@ def index_file(file_name, quiet=False):
 		import traceback
 		worker_log(str(e), level='error', quiet=quiet)
 		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return 0,time.perf_counter()
+		return None,f'{type(e).__name__}: {e}'
 	
 def stat_file(file_name, quiet=False):
 	start_stat_time = time.perf_counter()
@@ -343,7 +415,20 @@ def stat_file(file_name, quiet=False):
 		import traceback
 		worker_log(str(e), level='error', quiet=quiet)
 		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return 0,time.perf_counter(),0
+		return None,f'{type(e).__name__}: {e}',0
+
+def op_time(op_result):
+	# helpers return (start, end, ...) on success and (None, error_text, ...) on failure;
+	# a failed op keeps its error text in place of a duration so it never enters the timing stats
+	start, end = op_result[0], op_result[1]
+	if start is None:
+		return end
+	return end - start
+
+def format_op(op, spec=''):
+	if isinstance(op, str):
+		return 'FAILED'
+	return f'{op:{spec}} s'
 
 def int_to_color(n, brightness_threshold=500):
 	hash_value = hash(str(n))
@@ -354,14 +439,14 @@ def int_to_color(n, brightness_threshold=500):
 		return int_to_color(hash_value, brightness_threshold)
 	return (r, g, b)
 
-def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time):
+def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False):
 	local_results = []
 	r, g, b = int_to_color(os.getpid())
 	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} scheduled to start at {thread_start_time-time.perf_counter():.4f} later in {mode} mode.' + '\033[0m', quiet=quiet)
-	if zeros:
-		file_content = b'\x00' * file_size
-	else:
-		file_content = almost_urandom(file_size)
+	file_content = make_file_content(file_size, zeros, unique)
+	stamp_id = new_stamp_id()
+	stamp_files = unique and mode in ('write', 'random', 'comprehensive')
+	read_buffer = bytearray(file_size) if mode in ('read', 'random', 'comprehensive') else None
 	if time.perf_counter() > thread_start_time:
 		worker_log(f'Worker {counter} started late, expected start time {thread_start_time}, actual start time {time.perf_counter()}', level='error', quiet=quiet)
 	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} primed, waiting for {thread_start_time-time.perf_counter():.4f} seconds.' + '\033[0m', quiet=quiet)
@@ -375,92 +460,235 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		# print a digit every 10% of the files
 		if i % reportInterval == 0 and quiet:
 				print(f'\r{i//reportInterval}',end='',flush=True)
+		file_name = worker_file_path(directory, counter, i, file_count)
+		if stamp_files:
+			stamp_unique(file_content, stamp_id, i)
+		# -u read: stamp a file only when read_file is about to recreate it
+		before_recreate = functools.partial(stamp_unique, file_content, stamp_id, i) if unique else None
 		i = str(i+1).zfill(len(str(file_count)))
-		file_name = os.path.join(directory,str(counter), f"temp_{i}.bin")
 		if mode == 'write':
-			start_write_time,end_write_time = create_file(file_name, file_content, file_size, quiet=quiet)
-			local_results.append(end_write_time- start_write_time)
-			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\tin {end_write_time-start_write_time} s"+ '\033[0m', quiet=quiet)
+			write_time = op_time(create_file(file_name, file_content, file_size, quiet=quiet))
+			local_results.append(write_time)
+			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\t{format_op(write_time)}"+ '\033[0m', quiet=quiet)
 		elif mode == 'read':
-			start_read_time,end_read_time = read_file(file_name, file_content, file_size, quiet)
-			local_results.append(end_read_time- start_read_time)
-			worker_log(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\tin {end_read_time-start_read_time} s"+ '\033[0m', quiet=quiet)
+			read_time = op_time(read_file(file_name, file_content, file_size, quiet, buffer=read_buffer, before_recreate=before_recreate))
+			local_results.append(read_time)
+			worker_log(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\t{format_op(read_time)}"+ '\033[0m', quiet=quiet)
 		elif mode == 'random':
 			# here we start a random read or write
 			if bool(random.getrandbits(1)):
-				start_write_time,end_write_time = create_file(file_name, file_content, file_size, quiet=quiet)
-				local_results.append(end_write_time- start_write_time)
-				worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\tin {end_write_time-start_write_time} s"+ '\033[0m', quiet=quiet)
+				write_time = op_time(create_file(file_name, file_content, file_size, quiet=quiet))
+				local_results.append(write_time)
+				worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\t{format_op(write_time)}"+ '\033[0m', quiet=quiet)
 			else:
-				start_read_time,end_read_time = read_file(file_name, file_content, file_size, quiet)
-				local_results.append(end_read_time- start_read_time)
-				worker_log(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\tin {end_read_time-start_read_time} s"+ '\033[0m', quiet=quiet)
+				read_time = op_time(read_file(file_name, file_content, file_size, quiet, buffer=read_buffer))
+				local_results.append(read_time)
+				worker_log(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\t{format_op(read_time)}"+ '\033[0m', quiet=quiet)
 		elif mode == 'comprehensive':
 			resultList = []
 			moved_name = file_name + ".moved"
-			start_write_time,end_write_time = create_file(file_name, file_content, file_size, quiet=quiet)
-			resultList.append(end_write_time- start_write_time)
-			start_move_time,end_move_time = move_file(file_name, moved_name, quiet=quiet)
-			resultList.append(end_move_time- start_move_time)
-			start_stat_time,end_stat_time,size = stat_file(moved_name, quiet=quiet)
+			resultList.append(op_time(create_file(file_name, file_content, file_size, quiet=quiet)))
+			resultList.append(op_time(move_file(file_name, moved_name, quiet=quiet)))
+			stat_result = stat_file(moved_name, quiet=quiet)
+			size = stat_result[2]
 			if size != file_size:
 				worker_log(f'{bcolors.critical}File {file_name} size is wrong, expected {file_size}, got {size}\033[0m', level='error', quiet=quiet)
-			resultList.append(end_stat_time- start_stat_time)
-			start_read_time,end_read_time = read_file(moved_name, file_content, file_size, quiet)
-			resultList.append(end_read_time- start_read_time)
+			resultList.append(op_time(stat_result))
+			resultList.append(op_time(read_file(moved_name, file_content, file_size, quiet, buffer=read_buffer)))
 			try:
 				os.remove(moved_name)
 			except OSError:
 				pass
-			worker_log(f'\033[38;2;{r};{g};{b}m[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tW: {resultList[0]:.4f} s M: {resultList[1]:.4f} s S: {resultList[2]:.4f} s R: {resultList[3]:.4f} s\033[0m', quiet=quiet)
+			worker_log(f'\033[38;2;{r};{g};{b}m[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tW: {format_op(resultList[0], ".4f")} M: {format_op(resultList[1], ".4f")} S: {format_op(resultList[2], ".4f")} R: {format_op(resultList[3], ".4f")}\033[0m', quiet=quiet)
 			local_results.append(resultList)
 		elif mode == 'index':
 			# This will test the indexing performance of the filesystem
-			start_index_time,end_index_time = index_file(file_name, quiet)
-			local_results.append(end_index_time- start_index_time)
-			worker_log(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tIndexed\tin {end_index_time-start_index_time} s"+ '\033[0m', quiet=quiet)
+			index_time = op_time(index_file(file_name, quiet))
+			local_results.append(index_time)
+			worker_log(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tIndexed\t{format_op(index_time)}"+ '\033[0m', quiet=quiet)
 	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} finished.' + '\033[0m', quiet=quiet)
 	results.extend(local_results)
+
+def worker_counter_name(counter, process_count):
+	return str(counter).zfill(len(str(process_count)))
+
+def worker_file_path(directory, counter_name, index, file_count):
+	return os.path.join(directory, str(counter_name), f"temp_{str(index + 1).zfill(len(str(file_count)))}.bin")
+
+def worker_files(directories, process_count, file_count):
+	# (directory, counter_name, path) of every temp file the plain workers use
+	for counter in range(process_count):
+		directory = directories[counter % len(directories)]
+		counter_name = worker_counter_name(counter, process_count)
+		for index in range(file_count):
+			yield directory, counter_name, worker_file_path(directory, counter_name, index, file_count)
+
+def existing_size(path):
+	try:
+		return os.path.getsize(path) if os.path.isfile(path) else 0
+	except OSError:
+		return 0
+
+FREE_SPACE_MARGIN = 0.95
+
+COPY_ON_WRITE_FILESYSTEMS = ('btrfs', 'zfs')
+
+def space_needed(modes, file_size, file_count, process_count, directories,
+		simultaneous_write_count=None, layout_worker_count=None, skip_layout=False, mountinfo_lines=None):
+	# peak bytes each directory receives during the run
+	if mountinfo_lines is None:
+		mountinfo_lines = read_mountinfo()
+	needed = {d: 0 for d in directories}
+	rewrites = 'write' in modes or 'random' in modes
+	if rewrites or 'read' in modes:
+		# these files stay. Rewriting one frees its old size first, except on copy-on-write
+		# filesystems, where a snapshot can keep the old blocks allocated; read only
+		# recreates a missing or wrong-size file, at full size, before reading it
+		cow = {d: (find_mount(os.path.realpath(d), mountinfo_lines) or ('',))[0] in COPY_ON_WRITE_FILESYSTEMS
+			for d in directories}
+		for directory, _, path in worker_files(directories, process_count, file_count):
+			existing = existing_size(path)
+			if rewrites:
+				needed[directory] += file_size if cow[directory] else file_size - existing
+			elif existing != file_size:
+				needed[directory] += file_size
+	# comprehensive deletes each file after reading it and simultaneous removes its
+	# tree when done, so only the larger of the two is ever on disk at once
+	transient = {d: 0 for d in directories}
+	if 'comprehensive' in modes:
+		for counter in range(process_count):
+			transient[directories[counter % len(directories)]] += file_size
+	# skip_layout means the tuner already laid out the read files after checking space for
+	# them plus its largest writer count; attempts overwrite the same writer files
+	if 'simultaneous' in modes and not skip_layout:
+		simul = {d: 0 for d in directories}
+		write_count = simultaneous_write_count if simultaneous_write_count is not None else process_count // 2
+		layout_count = layout_worker_count if layout_worker_count is not None else process_count
+		for count in (write_count, layout_count):
+			for counter in range(count):
+				simul[directories[counter % len(directories)]] += file_size * file_count
+		for d in directories:
+			transient[d] = max(transient[d], simul[d])
+	return {d: needed[d] + transient[d] for d in directories}
+
+def space_pool(directory, mountinfo_lines):
+	# directories drawing on the same free space; btrfs subvolumes and ZFS datasets
+	# each get their own st_dev but share their filesystem's or pool's free space
+	mount = find_mount(os.path.realpath(directory), mountinfo_lines)
+	if mount:
+		fstype, source = mount
+		if fstype == 'btrfs':
+			return ('btrfs', source)
+		if fstype == 'zfs':
+			return ('zfs', source.split('/')[0])
+	return ('dev', os.stat(directory).st_dev)
+
+def check_free_space(needed_by_dir, tl, mountinfo_lines=None):
+	if mountinfo_lines is None:
+		mountinfo_lines = read_mountinfo()
+	spare = f"keeping {100 - FREE_SPACE_MARGIN * 100:.0f}% spare"
+	enough = True
+	pools = {}
+	for directory, needed in needed_by_dir.items():
+		free = shutil.disk_usage(directory).free
+		# each directory on its own: a ZFS quota or btrfs qgroup can leave it less room than its pool
+		if needed > free * FREE_SPACE_MARGIN:
+			tl.teeerror(f"Not enough free space for {directory}: this run needs {format_bytes(needed)}B, "
+				f"{format_bytes(free)}B free ({spare}).")
+			enough = False
+		pool = pools.setdefault(space_pool(directory, mountinfo_lines), [0, 0, []])
+		pool[0] += needed
+		pool[1] = max(pool[1], free)
+		pool[2].append(directory)
+	# ...and together, when several directories draw on one pool
+	for needed, free, dirs in pools.values():
+		if len(dirs) > 1 and needed > free * FREE_SPACE_MARGIN:
+			tl.teeerror(f"Not enough free space for {', '.join(dirs)}, which share their free space: "
+				f"this run needs {format_bytes(needed)}B, {format_bytes(free)}B free ({spare}).")
+			enough = False
+	if not enough:
+		tl.teeerror("Nothing was written. Reduce -fs, -fc or -pc (or use -ts) and try again.")
+	return enough
+
+def all_worker_files(directories, max_process_count, file_count):
+	# worker_files() for every padding width: tuning attempts and the memory check run at
+	# smaller process counts, and the counter padding follows the count (00..35 at -pc 36,
+	# 0..8 at -pc 9)
+	for width in range(1, len(str(max_process_count)) + 1):
+		for entry in worker_files(directories, min(max_process_count, 10 ** width - 1), file_count):
+			yield entry
+
+def remove_worker_files(entries):
+	# remove only these files, then their worker dirs if now empty
+	counter_dirs = set()
+	for directory, counter_name, path in entries:
+		counter_dirs.add(os.path.join(directory, counter_name))
+		try:
+			os.remove(path)
+		except OSError:
+			pass
+	for counter_dir in counter_dirs:
+		try:
+			os.rmdir(counter_dir)
+		except OSError:
+			pass
+
+def cleanup_worker_files(directories, process_count, file_count):
+	remove_worker_files(worker_files(directories, process_count, file_count))
+
+def cleanup_all_worker_files(directories, max_process_count, file_count):
+	remove_worker_files(all_worker_files(directories, max_process_count, file_count))
+
+def leftover_hint(directories, max_process_count, file_count):
+	paths = sorted({path for _, _, path in all_worker_files(directories, max_process_count, file_count)
+		if os.path.isfile(path)})
+	if not paths:
+		return None
+	total = sum(existing_size(path) for path in paths)
+	return (f"Left {len(paths)} test files ({format_bytes(total)}B) in {', '.join(directories)}; "
+		"use -cl/--cleanup to remove them.")
 
 def simultaneous_worker_dir(base_directory, run_id, counter):
 	return os.path.join(base_directory, f".iotest_simul_{run_id}", f"worker_{counter}")
 
-def layout_read_worker(file_count, file_size, base_directory, run_id, counter, quiet, zeros):
-	if zeros:
-		file_content = b'\x00' * file_size
-	else:
-		file_content = almost_urandom(file_size)
+def layout_read_worker(file_count, file_size, base_directory, run_id, counter, quiet, zeros, unique=False):
+	file_content = make_file_content(file_size, zeros, unique)
+	stamp_id = new_stamp_id()
 	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
 	os.makedirs(worker_dir, exist_ok=True)
 	for i in range(file_count):
+		if unique:
+			stamp_unique(file_content, stamp_id, i)
 		i_str = str(i + 1).zfill(len(str(file_count)))
 		file_name = os.path.join(worker_dir, f"read_{i_str}.bin")
 		create_file(file_name, file_content, file_size, quiet=quiet)
 
-def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id, counter, results, quiet, zeros, thread_start_time):
+def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id, counter, results, quiet, zeros, thread_start_time, unique=False):
 	local_results = []
 	r, g, b = int_to_color(os.getpid())
 	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} ({role}) scheduled to start at {thread_start_time-time.perf_counter():.4f} later.' + '\033[0m', quiet=quiet)
-	if zeros:
-		file_content = b'\x00' * file_size
-	else:
-		file_content = almost_urandom(file_size)
+	file_content = make_file_content(file_size, zeros, unique)
+	stamp_id = new_stamp_id()
 	while time.perf_counter() < thread_start_time:
 		time.sleep(0.001)
 	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
 	os.makedirs(worker_dir, exist_ok=True)
 	file_prefix = 'write_' if role == 'write' else 'read_'
+	read_buffer = bytearray(file_size) if role == 'read' else None
 	for i in range(file_count):
 		i_str = str(i + 1).zfill(len(str(file_count)))
 		file_name = os.path.join(worker_dir, f"{file_prefix}{i_str}.bin")
+		if unique and role == 'write':
+			stamp_unique(file_content, stamp_id, i)
 		if role == 'write':
-			start_time, end_time = create_file(file_name, file_content, file_size, quiet=quiet)
-			local_results.append(end_time - start_time)
-			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tWrote\tin {end_time-start_time} s" + '\033[0m', quiet=quiet)
+			op = op_time(create_file(file_name, file_content, file_size, quiet=quiet))
+			local_results.append(op)
+			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tWrote\t{format_op(op)}" + '\033[0m', quiet=quiet)
 		else:
-			start_time, end_time = read_file(file_name, file_content, file_size, quiet)
-			local_results.append(end_time - start_time)
-			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tRead\tin {end_time-start_time} s" + '\033[0m', quiet=quiet)
+			before_recreate = functools.partial(stamp_unique, file_content, stamp_id, i) if unique else None
+			op = op_time(read_file(file_name, file_content, file_size, quiet, buffer=read_buffer, before_recreate=before_recreate))
+			local_results.append(op)
+			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tRead\t{format_op(op)}" + '\033[0m', quiet=quiet)
 	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} ({role}) finished.' + '\033[0m', quiet=quiet)
 	results.extend(local_results)
 
@@ -475,14 +703,14 @@ def cleanup_simultaneous_tree(directories, run_id, process_count):
 				shutil.rmtree(simul_root, ignore_errors=True)
 
 def run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
-		counter_padding_process_count, quiet, zeros, tl):
+		counter_padding_process_count, quiet, zeros, tl, unique=False):
 	tl.teeprint(f"Simultaneous mode: layout pass writing read files ({layout_worker_count} workers)...")
 	layout_start = time.perf_counter()
 	layout_processes = []
 	for counter in range(layout_worker_count):
 		assigned_directory = directories[counter % len(directories)]
-		counter_str = str(counter).zfill(len(str(counter_padding_process_count)))
-		p = Process(target=layout_read_worker, args=(file_count, file_size, assigned_directory, run_id, counter_str, quiet, zeros))
+		counter_str = worker_counter_name(counter, counter_padding_process_count)
+		p = Process(target=layout_read_worker, args=(file_count, file_size, assigned_directory, run_id, counter_str, quiet, zeros, unique))
 		layout_processes.append(p)
 	for p in layout_processes:
 		p.start()
@@ -516,14 +744,36 @@ def addToDicWithoutOverwrite(dic,key,value):
 	else:
 		dic[key] = value
 
+def add_op_results(outResults, failedOps, key, samples):
+	# failed ops carry their error text instead of a duration (see op_time).
+	# Always add to both dicts so repeated keys get renamed in lockstep.
+	times = [s for s in samples if not isinstance(s, str)]
+	addToDicWithoutOverwrite(outResults, key, times)
+	addToDicWithoutOverwrite(failedOps, key, [s for s in samples if isinstance(s, str)])
+	return times
+
+def dead_worker_errors(processes, file_count):
+	# a worker hands its results over only at the very end, so one that dies
+	# (e.g. it cannot create its directory) loses every op it was given
+	errors = []
+	for p in processes:
+		if p.exitcode != 0:
+			errors.extend([f"worker process exited with code {p.exitcode} before reporting results"] * file_count)
+	return errors
+
+def total_failed_ops(result):
+	return sum(len(errors) for errors in result.get('failedOps', {}).values())
+
 def benchmarkGenSpeed(file_size, file_count,zeros,results,timeout=5):
 	start_time = time.perf_counter()
 	c = 0
 	while True:
 		if zeros:
-			_ = b'\x00' * file_size
+			content = b'\x00' * file_size
 		else:
-			_ = almost_urandom(file_size) 
+			content = almost_urandom(file_size)
+		# free it now, or the next iteration holds two buffers while generating
+		del content
 		c += 1
 		if (file_count > 0 and c >= file_count) or time.perf_counter() - start_time > timeout:
 			break
@@ -579,7 +829,109 @@ def format_iops(iops):
 		return 'N/A'
 	return f"{iops:,.2f}"
 
-def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None):
+SHORT_REPORT_TIMEOUT = 10
+
+def post_short_report(message_end_point_address, content):
+	payload = json.dumps({'content': content}).encode()
+	# an explicit agent: some webhook hosts (Discord) reject urllib's default Python-urllib one
+	request = urllib.request.Request(message_end_point_address, data=payload, method='POST',
+		headers={'Content-Type': 'application/json', 'User-Agent': f'iotest/{version}'})
+	with urllib.request.urlopen(request, timeout=SHORT_REPORT_TIMEOUT):
+		pass
+
+def send_short_reports(message_end_point_address, short_reports, tl):
+	# a notification failure must not cost the results, so this runs after the report is out
+	if '://' not in message_end_point_address:
+		# curl assumed http:// for a bare host:port/path; keep accepting those
+		message_end_point_address = 'http://' + message_end_point_address
+	host = urllib.parse.urlsplit(message_end_point_address).netloc or message_end_point_address
+	for sent, short_report in enumerate(short_reports):
+		try:
+			post_short_report(message_end_point_address, short_report)
+		except Exception as e:
+			# the rest would most likely fail the same way, each after a full timeout
+			skipped = len(short_reports) - sent - 1
+			skipped_note = f" (skipping {skipped} more)" if skipped else ""
+			tl.teeerror(f"Failed to send short report to {host}: {e}{skipped_note}")
+			return
+
+def memory_copies(modes):
+	# every worker holds its file content; workers that also read hold a read buffer too
+	return 2 if any(mode in ('read', 'random', 'comprehensive', 'simultaneous') for mode in modes) else 1
+
+def read_meminfo():
+	# (MemAvailable, SwapFree) in bytes, -1 when unknown
+	phyFreeMemory = -1
+	swapMemory = -1
+	if os.path.exists('/proc/meminfo'):
+		with open('/proc/meminfo') as f:
+			for line in f:
+				if 'MemAvailable' in line:
+					phyFreeMemory = int(line.split()[1]) * 1024
+				if 'SwapFree' in line:
+					swapMemory = int(line.split()[1]) * 1024
+	return phyFreeMemory, swapMemory
+
+NETWORK_FILESYSTEMS = ('nfs', 'nfs4', 'cifs', 'smb3')
+
+def read_mountinfo():
+	try:
+		with open('/proc/self/mountinfo') as f:
+			return f.read().splitlines()
+	except OSError:
+		return []
+
+def unescape_mount_path(path):
+	# mountinfo writes space, tab, newline and backslash as octal escapes (\040 ...)
+	return re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), path)
+
+def find_mount(path, mountinfo_lines):
+	# (fstype, source) of the deepest mount point that contains path
+	best = None
+	best_len = -1
+	for line in mountinfo_lines:
+		fields = line.split()
+		if '-' not in fields:
+			continue
+		sep = fields.index('-')
+		if sep < 5 or len(fields) < sep + 3:
+			continue
+		mount_point = unescape_mount_path(fields[4])
+		inside = path == mount_point or path.startswith(mount_point.rstrip('/') + '/')
+		# >= so a later line for the same mount point (mounted on top) wins
+		if inside and len(mount_point) >= best_len:
+			best = (fields[sep + 1], unescape_mount_path(fields[sep + 2]))
+			best_len = len(mount_point)
+	return best
+
+def zfs_dedup_property(dataset):
+	try:
+		proc = subprocess.run(['zfs', 'get', '-H', '-o', 'value', 'dedup', dataset],
+			stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True, timeout=5)
+	except Exception:
+		return None
+	if proc.returncode != 0:
+		return None
+	return proc.stdout.strip() or None
+
+def dedup_warning(directory, mountinfo_lines):
+	mount = find_mount(os.path.realpath(directory), mountinfo_lines)
+	if not mount:
+		return None
+	fstype, source = mount
+	if fstype in NETWORK_FILESYSTEMS:
+		reason = f"is on {fstype} ({source}), which may deduplicate on the server"
+	elif fstype == 'zfs':
+		dedup = zfs_dedup_property(source)
+		if not dedup or dedup == 'off':
+			return None
+		reason = f"is on ZFS dataset {source} with dedup={dedup}"
+	else:
+		return None
+	return (f"Warning! {directory} {reason}. Each worker writes identical files, "
+		"so results may be optimistic. Use -u/--unique_files to make every file unique.")
+
+def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None,unique=False,cleanup=False):
 	if tuning_attempt:
 		no_report = True
 		message_end_point_address = None
@@ -599,35 +951,47 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 	for output_dir in directories:
 		os.makedirs(output_dir, exist_ok=True)
 	primary_directory = directories[0]
+	mountinfo = read_mountinfo()
+	dedup_notes = []
+	# index and benchmark write no file data, so dedup cannot skew them
+	if not unique and not tuning_attempt and any(mode not in ('index', 'benchmark') for mode in modes):
+		dedup_notes = [note for note in (dedup_warning(d, mountinfo) for d in directories) if note]
+		for note in dedup_notes:
+			tl.teelog(note, level='warning')
 	processes = []
 	file_size = int(file_size)
 	outResults = dict()
+	failedOps = {}
 	totalTime = {}
 	mode_process_counts = {}
-	estimatedTotalMemory = file_size * process_count * 1.2
-	phyFreeMemory = -1
-	swapMemory = -1
+	memoryPerProcess = file_size * memory_copies(modes) * 1.2
+	estimatedTotalMemory = memoryPerProcess * process_count
 	if modes == ['benchmark']:
 		file_count = 0
-	if os.path.exists('/proc/meminfo'):
-		try:
-			with open('/proc/meminfo') as f:
-				for line in f:
-					if 'MemAvailable' in line:
-						phyFreeMemory = int(line.split()[1]) * 1024
-					if 'SwapFree' in line:
-						swapMemory = int(line.split()[1]) * 1024
-		except Exception:
-			tl.teeerror("Failed to read /proc/meminfo")
+	try:
+		phyFreeMemory, swapMemory = read_meminfo()
+	except Exception:
+		phyFreeMemory, swapMemory = -1, -1
+		tl.teeerror("Failed to read /proc/meminfo")
 	# warn if the estimated total memory is more than 90% of the total free memory
 	if phyFreeMemory + swapMemory > 0 and estimatedTotalMemory > phyFreeMemory + swapMemory:
 		tl.teeerror("Estimated total memory usage is more than the all available memory to use.")
 		tl.teeerror(f"Physical available memory: {format_bytes(phyFreeMemory)}B")
 		tl.teeerror(f"Swap available memory: {format_bytes(swapMemory)}B")
 		tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
-		process_count = max(int((phyFreeMemory + swapMemory) // file_size // 1.2), 1)
+		process_count = max(int((phyFreeMemory + swapMemory) // memoryPerProcess), 1)
 		tl.teeerror(f"Reducing the number of processes to {process_count}")
-	estimatedTotalMemory = file_size * process_count * 1.2
+	if 'simultaneous' in modes and simultaneous_write_count is not None and simultaneous_write_count > process_count - 1 >= 1:
+		# the memory check may have cut process_count below the requested split
+		tl.teelog(f"Reducing simultaneous writers from {simultaneous_write_count} to {process_count - 1} to keep a reader", level='warning')
+		simultaneous_write_count = process_count - 1
+	estimatedTotalMemory = memoryPerProcess * process_count
+	# the disk check needs the final process_count, but runs before the 16 s memory pause
+	needed = space_needed(modes, file_size, file_count, process_count, directories,
+		simultaneous_write_count=simultaneous_write_count, layout_worker_count=simultaneous_layout_workers,
+		skip_layout=simultaneous_skip_layout, mountinfo_lines=mountinfo)
+	if not check_free_space(needed, tl, mountinfo):
+		sys.exit(1)
 	if phyFreeMemory > 0 and estimatedTotalMemory > phyFreeMemory * 0.9:
 		tl.teeerror("Estimated total memory usage is more than 90% of the total non swap available memory.")
 		tl.teeerror("You may want to reduce the file size or the number of processes.")
@@ -707,7 +1071,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 				try:
 					if not simultaneous_skip_layout:
 						run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
-							layout_padding_pc, quiet, zeros, tl)
+							layout_padding_pc, quiet, zeros, tl, unique)
 					write_results = manager.list()
 					read_results = manager.list()
 					write_processes = []
@@ -716,13 +1080,17 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 					tl.teeprint(f"Simultaneous mode: {write_count} writers + {read_count} readers...")
 					for counter in range(write_count):
 						assigned_directory = directories[counter % len(directories)]
-						counter_str = str(counter).zfill(len(str(process_count)))
-						p = Process(target=simultaneous_role_worker, args=('write', file_count, file_size, assigned_directory, run_id, counter_str, write_results, quiet, zeros, thread_start_time))
+						# the layout's padding, not this run's: tuning attempts at smaller counts then
+						# overwrite the same writer files instead of adding a second set
+						counter_str = worker_counter_name(counter, layout_padding_pc)
+						p = Process(target=simultaneous_role_worker, args=('write', file_count, file_size, assigned_directory, run_id, counter_str, write_results, quiet, zeros, thread_start_time, unique))
 						write_processes.append(p)
 					for counter in range(read_count):
 						assigned_directory = directories[counter % len(directories)]
-						counter_str = str(counter).zfill(len(str(process_count)))
-						p = Process(target=simultaneous_role_worker, args=('read', file_count, file_size, assigned_directory, run_id, counter_str, read_results, quiet, zeros, thread_start_time))
+						# readers read the layout pass's files, so they use its padding (the tuner
+						# lays out for its largest process count and then runs smaller attempts)
+						counter_str = worker_counter_name(counter, layout_padding_pc)
+						p = Process(target=simultaneous_role_worker, args=('read', file_count, file_size, assigned_directory, run_id, counter_str, read_results, quiet, zeros, thread_start_time, unique))
 						read_processes.append(p)
 					totalStartTime = thread_start_time
 					for p in write_processes + read_processes:
@@ -733,8 +1101,8 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 					for p in read_processes:
 						p.join()
 					read_sync_time = time.perf_counter() - totalStartTime
-					addToDicWithoutOverwrite(outResults, 'write', list(write_results))
-					addToDicWithoutOverwrite(outResults, 'read', list(read_results))
+					add_op_results(outResults, failedOps, 'write', list(write_results) + dead_worker_errors(write_processes, file_count))
+					add_op_results(outResults, failedOps, 'read', list(read_results) + dead_worker_errors(read_processes, file_count))
 					addToDicWithoutOverwrite(totalTime, 'write', write_sync_time)
 					addToDicWithoutOverwrite(totalTime, 'read', read_sync_time)
 					addToDicWithoutOverwrite(mode_process_counts, 'write', write_count)
@@ -749,8 +1117,8 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			thread_start_time = time.perf_counter() + processStartDelay
 			for counter in range(process_count):
 				assigned_directory = directories[counter % len(directories)]
-				counter = str(counter).zfill(len(str(process_count)))
-				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time))
+				counter = worker_counter_name(counter, process_count)
+				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique))
 				processes.append(p)
 			totalStartTime = thread_start_time
 			for p in processes:
@@ -758,21 +1126,19 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			for p in processes:
 				p.join()
 			totalEndTime =  time.perf_counter() - totalStartTime
+			dead_errors = dead_worker_errors(processes, file_count)
 			processes.clear()
 			if mode == 'comprehensive':
-				writes = [result[0] for result in results]
-				moves = [result[1] for result in results]
-				stats = [result[2] for result in results]
-				reads = [result[3] for result in results]
+				results = list(results) + [[error] * 4 for error in dead_errors]
+				writes = add_op_results(outResults,failedOps,'write',[result[0] for result in results])
+				moves = add_op_results(outResults,failedOps,'move',[result[1] for result in results])
+				stats = add_op_results(outResults,failedOps,'stat',[result[2] for result in results])
+				reads = add_op_results(outResults,failedOps,'read',[result[3] for result in results])
 				sumWTime = sum(writes)
 				sumMTime = sum(moves)
 				sumSTime = sum(stats)
 				sumRTime = sum(reads)
 				sumAllTime = sumWTime + sumMTime + sumSTime + sumRTime
-				addToDicWithoutOverwrite(outResults,'write',writes)
-				addToDicWithoutOverwrite(outResults,'move',moves)
-				addToDicWithoutOverwrite(outResults,'stat',stats)
-				addToDicWithoutOverwrite(outResults,'read',reads)
 				for key in ('write','move','stat','read'):
 					addToDicWithoutOverwrite(mode_process_counts,key,process_count)
 				if sumAllTime > 0:
@@ -786,7 +1152,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 					addToDicWithoutOverwrite(totalTime,'stat',totalEndTime)
 					addToDicWithoutOverwrite(totalTime,'read',totalEndTime)
 			else:
-				addToDicWithoutOverwrite(outResults,mode,list(results))
+				add_op_results(outResults,failedOps,mode,list(results) + dead_errors)
 				addToDicWithoutOverwrite(totalTime,mode,totalEndTime)
 				addToDicWithoutOverwrite(mode_process_counts,mode,process_count)
 	# write the outResults to a csv file
@@ -800,8 +1166,9 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			# so that we can write it to the csv file
 			# first, we write the header
 			f.write(','.join([key+'_time' for key in outResults.keys()]) + '\n')
-			# then we write the results
-			for row in zip(*outResults.values()):
+			# then we write the results; columns can differ in length (uneven
+			# simultaneous splits, failed ops), so pad short ones with blank cells
+			for row in itertools.zip_longest(*outResults.values(), fillvalue=''):
 				f.write(','.join(map(str,row)) + '\n')
 		tl.teeprint(f"\nResults written to {csv_file_name}")
 	# calculate the summary for each key in outResults
@@ -815,11 +1182,25 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 	# total bandwidth
 	# total size
 	report = []
+	short_reports = []
 	for mode in outResults:
 		report.append("*"*80)
 		report.append(f"Report for {mode} mode:")
 		if zeros:
 			report.append("Warning! Using zeros for file content. Compressed filesystems will show optimistic results.")
+		report.extend(dedup_notes)
+		failed = failedOps.get(mode, [])
+		op_count = len(outResults[mode]) + len(failed)
+		failed_note = ''
+		if failed:
+			failed_note = f", {len(failed)} of {op_count} ops failed"
+			report.append(f"Failed {mode} ops:      \t{len(failed)} of {op_count}, first error: {failed[0]}")
+		if not outResults[mode]:
+			report.append(f"No successful {mode} ops, skipping timing statistics.")
+			report.append("-"*80)
+			if message_end_point_address and failed:
+				short_reports.append(f"Short Report for {mode} mode: all {op_count} ops failed, first error: {failed[0]}")
+			continue
 		avg_time = sum(outResults[mode]) / len(outResults[mode])
 		outResults[mode].sort()
 		median_time = outResults[mode][len(outResults[mode]) // 2]
@@ -830,7 +1211,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 		effective_pc = mode_process_counts.get(mode, process_count)
 		call_iops, sync_iops = calc_iops(outResults[mode], totalTime.get(mode), effective_pc)
 		if 'write' in mode or 'read' in mode:
-			total_size = file_size * file_count * effective_pc
+			total_size = file_size * len(outResults[mode])
 			total_p_time = sum(outResults[mode]) / effective_pc
 			total_bandwidth = total_size / total_p_time
 			report.append(f"Total {mode} size:      \t{format_bytes(total_size)}B")
@@ -854,10 +1235,10 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			report.append(f"Warning | iotest: 1% high is {one_percent_high_time:.4f} s, 1% low is {one_percent_low_time:.4f} s, threshold is {threshold_to_report_anomaly}")
 		if message_end_point_address:
 			if 'write' in mode or 'read' in mode:
-				payload = json.dumps({'content': f"Short Report for {mode} mode: Speed {format_bytes(total_bandwidth)}B/s, {format_iops(call_iops)} IOPS @ {total_p_time / totalTime[mode] * 100:.2f}% IO time"})
+				short_report = f"Short Report for {mode} mode: Speed {format_bytes(total_bandwidth)}B/s, {format_iops(call_iops)} IOPS @ {total_p_time / totalTime[mode] * 100:.2f}% IO time"
 			else:
-				payload = json.dumps({'content': f"Short Report for {mode} mode: {format_iops(call_iops)} IOPS, avg {avg_time:.4f} s, median {median_time:.4f} s"})
-			subprocess.run(['curl', '-s', '-X', 'POST', '-H', 'Content-Type: application/json', '-d', payload, message_end_point_address])
+				short_report = f"Short Report for {mode} mode: {format_iops(call_iops)} IOPS, avg {avg_time:.4f} s, median {median_time:.4f} s"
+			short_reports.append(short_report + failed_note)
 	tl.teeprint('\n'.join(report))
 	# write the report to a file
 	if not no_report and outResults:
@@ -866,6 +1247,10 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			f.write('\n'.join(report))
 		tl.teeprint(f"Report written to {report_file_name}")
 		print(f"Log file: {tl.logFileName}")
+	if cleanup:
+		cleanup_worker_files(directories, process_count, file_count)
+	if message_end_point_address and short_reports:
+		send_short_reports(message_end_point_address, short_reports, tl)
 	return {
 		'outResults': outResults,
 		'totalTime': totalTime,
@@ -873,6 +1258,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 		'file_size': file_size,
 		'file_count': file_count,
 		'mode_process_counts': mode_process_counts,
+		'failedOps': failedOps,
 	}
 
 MODE_ALIASES = {
@@ -915,32 +1301,39 @@ def _simultaneous_session_kwargs(run_id, max_pc, skip_layout=True, skip_cleanup=
 
 def _run_tuning_main(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 		stealth, threshold_to_report_anomaly, benchmarkTime, simultaneous_write_count=None,
-		simultaneous_session=None):
+		simultaneous_session=None, unique=False):
 	kwargs = simultaneous_session or {}
-	return main(file_size, file_count, process_count, directory, modes, quiet, zeros, tl=tl,
+	result = main(file_size, file_count, process_count, directory, modes, quiet, zeros, tl=tl,
 		stealth=stealth, message_end_point_address=None, no_report=True,
 		threshold_to_report_anomaly=threshold_to_report_anomaly, benchmarkTime=benchmarkTime,
-		tuning_attempt=True, simultaneous_write_count=simultaneous_write_count, **kwargs)
+		tuning_attempt=True, simultaneous_write_count=simultaneous_write_count, unique=unique, **kwargs)
+	failed = total_failed_ops(result)
+	if failed:
+		tl.teeerror(f"Tuning attempt had {failed} failed ops; not tuning against incomplete results.")
+		sys.exit(1)
+	return result
 
 def _finalize_tuning_run(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 		stealth, message_end_point_address, no_report, threshold_to_report_anomaly, benchmarkTime,
-		simultaneous_write_count=None, simultaneous_session=None):
+		simultaneous_write_count=None, simultaneous_session=None, unique=False):
 	if not no_report or message_end_point_address:
 		kwargs = simultaneous_session or {}
-		main(file_size, file_count, process_count, directory, modes, quiet, zeros, tl=tl,
+		result = main(file_size, file_count, process_count, directory, modes, quiet, zeros, tl=tl,
 			stealth=stealth, message_end_point_address=message_end_point_address,
 			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
 			benchmarkTime=benchmarkTime, tuning_attempt=False,
-			simultaneous_write_count=simultaneous_write_count, **kwargs)
+			simultaneous_write_count=simultaneous_write_count, unique=unique, **kwargs)
+		if total_failed_ops(result):
+			sys.exit(1)
 
 def tune_single_role(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 		role, target_bps, stealth=False, message_end_point_address=None, no_report=False,
-		threshold_to_report_anomaly=0, benchmarkTime=5, simultaneous_write_count=None):
+		threshold_to_report_anomaly=0, benchmarkTime=5, simultaneous_write_count=None, unique=False):
 	pc = process_count
 	tl.teeprint(f"Target throughput tuning: {role} target={format_bytes(target_bps)}B/s, starting process_count={pc}")
 	for attempt in range(1, MAX_TUNING_ATTEMPTS + 1):
 		result = _run_tuning_main(file_size, file_count, pc, directory, modes, quiet, zeros, tl,
-			stealth, threshold_to_report_anomaly, benchmarkTime, simultaneous_write_count)
+			stealth, threshold_to_report_anomaly, benchmarkTime, simultaneous_write_count, unique=unique)
 		effective_pc = result['process_count']
 		measured = measure_role_bandwidth(result, role)
 		if measured is None:
@@ -963,14 +1356,14 @@ def tune_single_role(file_size, file_count, process_count, directory, modes, qui
 				f"measured={format_bytes(measured)}B/s")
 			_finalize_tuning_run(file_size, file_count, effective_pc, directory, modes, quiet, zeros, tl,
 				stealth, message_end_point_address, no_report, threshold_to_report_anomaly,
-				benchmarkTime, simultaneous_write_count)
+				benchmarkTime, simultaneous_write_count, unique=unique)
 			return 0
 		if effective_pc <= 1:
 			tl.teeprint(f"At process_count=1, {role} measured {format_bytes(measured)}B/s still above target; "
 				f"accepting as best effort.")
 			_finalize_tuning_run(file_size, file_count, 1, directory, modes, quiet, zeros, tl,
 				stealth, message_end_point_address, no_report, threshold_to_report_anomaly,
-				benchmarkTime, simultaneous_write_count)
+				benchmarkTime, simultaneous_write_count, unique=unique)
 			return 0
 		new_pc = max(1, int(effective_pc * target_bps / measured))
 		if new_pc >= effective_pc:
@@ -981,13 +1374,13 @@ def tune_single_role(file_size, file_count, process_count, directory, modes, qui
 
 def tune_dual_role_shared_pc(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 		write_target, read_target, stealth=False, message_end_point_address=None, no_report=False,
-		threshold_to_report_anomaly=0, benchmarkTime=5):
+		threshold_to_report_anomaly=0, benchmarkTime=5, unique=False):
 	pc = process_count
 	tl.teeprint(f"Target throughput tuning: write target={format_bytes(write_target)}B/s, "
 		f"read target={format_bytes(read_target)}B/s, starting process_count={pc}")
 	for attempt in range(1, MAX_TUNING_ATTEMPTS + 1):
 		result = _run_tuning_main(file_size, file_count, pc, directory, modes, quiet, zeros, tl,
-			stealth, threshold_to_report_anomaly, benchmarkTime)
+			stealth, threshold_to_report_anomaly, benchmarkTime, unique=unique)
 		effective_pc = result['process_count']
 		write_measured = measure_role_bandwidth(result, 'write')
 		read_measured = measure_role_bandwidth(result, 'read')
@@ -1015,12 +1408,12 @@ def tune_dual_role_shared_pc(file_size, file_count, process_count, directory, mo
 			tl.teeprint(f"Target throughput reached: process_count={effective_pc}, "
 				f"write={format_bytes(write_measured)}B/s, read={format_bytes(read_measured)}B/s")
 			_finalize_tuning_run(file_size, file_count, effective_pc, directory, modes, quiet, zeros, tl,
-				stealth, message_end_point_address, no_report, threshold_to_report_anomaly, benchmarkTime)
+				stealth, message_end_point_address, no_report, threshold_to_report_anomaly, benchmarkTime, unique=unique)
 			return 0
 		if effective_pc <= 1:
 			tl.teeprint("At process_count=1, both write and read still above target; accepting as best effort.")
 			_finalize_tuning_run(file_size, file_count, 1, directory, modes, quiet, zeros, tl,
-				stealth, message_end_point_address, no_report, threshold_to_report_anomaly, benchmarkTime)
+				stealth, message_end_point_address, no_report, threshold_to_report_anomaly, benchmarkTime, unique=unique)
 			return 0
 		new_pc = max(1, min(int(effective_pc * write_target / write_measured),
 			int(effective_pc * read_target / read_measured)))
@@ -1038,7 +1431,7 @@ def estimate_simultaneous_split(process_count, write_target, read_target):
 
 def tune_simultaneous(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 		write_target, read_target, stealth=False, message_end_point_address=None, no_report=False,
-		threshold_to_report_anomaly=0, benchmarkTime=5):
+		threshold_to_report_anomaly=0, benchmarkTime=5, unique=False):
 	benchmarkTime = SIMULTANEOUS_TUNING_BENCHMARK_TIME
 	max_pc = process_count
 	pc = process_count
@@ -1073,7 +1466,7 @@ def tune_simultaneous(file_size, file_count, process_count, directory, modes, qu
 	def finalize_simultaneous_tuning():
 		_finalize_tuning_run(file_size, file_count, pc, directory, modes, quiet, zeros, tl,
 			stealth, message_end_point_address, no_report, threshold_to_report_anomaly,
-			benchmarkTime, write_count, simultaneous_session=sim_session)
+			benchmarkTime, write_count, simultaneous_session=sim_session, unique=unique)
 	last_valid = None
 	def note_valid_config():
 		nonlocal last_valid
@@ -1096,12 +1489,18 @@ def tune_simultaneous(file_size, file_count, process_count, directory, modes, qu
 			f"read={format_bytes(last_valid['read_measured'])}B/s).")
 		finalize_simultaneous_tuning()
 		return True
+	# the layout is written here, outside main(), so check before it; the split
+	# can move to max_pc - 1 writers while tuning
+	needed = space_needed(['simultaneous'], file_size, file_count, max_pc, directories,
+		simultaneous_write_count=max_pc - 1, layout_worker_count=layout_workers)
+	if not check_free_space(needed, tl):
+		sys.exit(1)
 	try:
-		run_simultaneous_layout(file_count, file_size, directories, run_id, layout_workers, max_pc, quiet, zeros, tl)
+		run_simultaneous_layout(file_count, file_size, directories, run_id, layout_workers, max_pc, quiet, zeros, tl, unique)
 		for attempt in range(1, MAX_TUNING_ATTEMPTS + 1):
 			result = _run_tuning_main(file_size, file_count, pc, directory, modes, quiet, zeros, tl,
 				stealth, threshold_to_report_anomaly, benchmarkTime, write_count,
-				simultaneous_session=sim_session)
+				simultaneous_session=sim_session, unique=unique)
 			write_measured = measure_role_bandwidth(result, 'write')
 			read_measured = measure_role_bandwidth(result, 'read')
 			if write_measured is None or read_measured is None:
@@ -1248,12 +1647,26 @@ def tune_simultaneous(file_size, file_count, process_count, directory, modes, qu
 
 def tune_for_targets(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 		write_target, read_target, stealth=False, message_end_point_address=None, no_report=False,
-		threshold_to_report_anomaly=0, benchmarkTime=5):
+		threshold_to_report_anomaly=0, benchmarkTime=5, unique=False, cleanup=False):
+	# clean up once at the end: deleting files between attempts would make the next
+	# read attempt recreate them inside its timed pass
+	try:
+		_tune_for_targets(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+			write_target, read_target, stealth=stealth, message_end_point_address=message_end_point_address,
+			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
+			benchmarkTime=benchmarkTime, unique=unique)
+	finally:
+		if cleanup:
+			cleanup_all_worker_files(normalize_directories(directory), process_count, file_count)
+
+def _tune_for_targets(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
+		write_target, read_target, stealth=False, message_end_point_address=None, no_report=False,
+		threshold_to_report_anomaly=0, benchmarkTime=5, unique=False):
 	if 'simultaneous' in modes:
 		tune_simultaneous(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 			write_target, read_target, stealth=stealth, message_end_point_address=message_end_point_address,
 			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
-			benchmarkTime=benchmarkTime)
+			benchmarkTime=benchmarkTime, unique=unique)
 		return
 	is_comprehensive = 'comprehensive' in modes
 	is_dual_phase = 'write' in modes and 'read' in modes and not is_comprehensive
@@ -1261,19 +1674,19 @@ def tune_for_targets(file_size, file_count, process_count, directory, modes, qui
 		tune_dual_role_shared_pc(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 			write_target, read_target, stealth=stealth, message_end_point_address=message_end_point_address,
 			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
-			benchmarkTime=benchmarkTime)
+			benchmarkTime=benchmarkTime, unique=unique)
 		return
 	if write_target:
 		tune_single_role(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 			'write', write_target, stealth=stealth, message_end_point_address=message_end_point_address,
 			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
-			benchmarkTime=benchmarkTime)
+			benchmarkTime=benchmarkTime, unique=unique)
 		return
 	if read_target:
 		tune_single_role(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 			'read', read_target, stealth=stealth, message_end_point_address=message_end_point_address,
 			no_report=no_report, threshold_to_report_anomaly=threshold_to_report_anomaly,
-			benchmarkTime=benchmarkTime)
+			benchmarkTime=benchmarkTime, unique=unique)
 
 def parse_size_arg(size_arg, unitless_as_mb=True):
 	size_arg = str(size_arg).strip().lower()
@@ -1291,6 +1704,12 @@ def parse_size_arg(size_arg, unitless_as_mb=True):
 		return int(float(size_arg) * 1024 * 1024)
 	return int(float(size_arg))
 
+def positive_int(value):
+	number = int(value)
+	if number < 1:
+		raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+	return number
+
 def climain():
 	default_file_size_str = '30'
 	default_file_count = 50
@@ -1298,8 +1717,8 @@ def climain():
 
 	parser = argparse.ArgumentParser(description="Test total disk bandwidth. Default mode is write (w). Comprehensive mode: write -> move -> stat -> read")
 	parser.add_argument("-fs","--file_size", type=str, help="File size (default:30), defaults to mb, can specify in t(b),g(b),m(b),k(b),b", default=None)
-	parser.add_argument("-fc","--file_count", type=int, help="Number of files to create and read per process (default:50)",default=None)
-	parser.add_argument("-t",'-pc',"--process_count", type=int, help="Number of processes to run concurrently (default:36)", default=None)
+	parser.add_argument("-fc","--file_count", type=positive_int, help="Number of files to create and read per process (default:50)",default=None)
+	parser.add_argument("-t",'-pc',"--process_count", type=positive_int, help="Number of processes to run concurrently (default:36)", default=None)
 	parser.add_argument("-ts","--total_size", type=str, help="Total size target. If -fs/-fc/-pc is omitted, auto-calculate one missing arg to fit this total size.")
 	parser.add_argument('-d',"--directory", action='append', type=str, help="Directory to put the files in. Repeat -d to round-robin workers across directories (default:<pwd>)", default=None)
 	parser.add_argument('-ld',"--log_directory", type=str, help="Directory to put the log files in (default:/var/log/)", default='/var/log/')
@@ -1310,14 +1729,16 @@ def climain():
  INDEX: creates --file_count index folders, stat each, then delete.
  RWI / WRI: run write, then read, then index sequentially in batch mode.
  SIMULTANEOUS / S: layout write pass for read files, then concurrent write+read on separate files; cleans up afterward.""",choices=['read', 'write','random','index','benchmark','comprehensive','simultaneous','r','w','rw','wr','i','rwi','wri','c','b','s'], default="w")
-	parser.add_argument("-q","--quiet", action="store_true", help="Suppress output, default True in new version",default=True)
+	parser.add_argument("-q","--quiet", action="store_true", help="Kept for compatibility: quiet is the default. Use -v for per-file output",default=True)
 	parser.add_argument("-v","--verbose", action="store_true", help="Verbose output",default=False)
 	parser.add_argument("-S",'--stealth', action="store_true", help="Suppress verbose output and verbose log file",default=False)
 	parser.add_argument('-nl',"--no_log", action="store_true", help="Do not write log files",default=False)
 	parser.add_argument('-nr',"--no_report", action="store_true", help="Do not write report files",default=False)
 	parser.add_argument("-z","--zeros", action="store_true", help="Use zeros instead of random numbers. Use this if you are sure no write compression is available. Potentially higher write accuracy.",default=False)
+	parser.add_argument("-u","--unique_files", action="store_true", help="Stamp every 512-byte block with (file, block, worker) so no two blocks of the run are identical. Use on storage that deduplicates (iotest warns when it detects some). Adds a few ms per 30 MiB file to sync times.",default=False)
+	parser.add_argument("-cl","--cleanup", action="store_true", help="Delete the test files when the run ends (default: keep them, so a later read run can reuse them)",default=False)
 	parser.add_argument('-addr',"--message_end_point_address", type=str, help="The end point address of the message")
-	parser.add_argument('--threshold_to_report_anomaly', type=int, help="The threshold to report if 1 percent high is higher then 1 percent low * <threshold_to_report_anomaly>",default=0)
+	parser.add_argument('--threshold_to_report_anomaly', type=float, help="The threshold to report if 1 percent high is higher then 1 percent low * <threshold_to_report_anomaly>",default=0)
 	parser.add_argument('-bt',"--benchmark_time", type=int, help="The time in seconds to run the benchmark for file generation speed",default=5)
 	parser.add_argument("-wtpt", "--write_target_throughput", type=str,
 		help="Target sync write throughput (e.g. 500m, 2g). Auto-tunes the first write pass.")
@@ -1343,6 +1764,8 @@ def climain():
 	process_count_specified = args.process_count is not None
 
 	args.file_size = parse_size_arg(args.file_size if file_size_specified else default_file_size_str, unitless_as_mb=True)
+	if args.file_size < 1:
+		parser.error("argument -fs/--file_size: must be at least 1 byte")
 	args.file_count = args.file_count if file_count_specified else default_file_count
 	args.process_count = args.process_count if process_count_specified else default_process_count
 
@@ -1417,9 +1840,17 @@ def climain():
 		tune_for_targets(args.file_size, args.file_count, args.process_count, args.directory, modes,
 			args.quiet, args.zeros, tl, write_target, read_target, stealth=args.stealth,
 			message_end_point_address=args.message_end_point_address, no_report=args.no_report,
-			threshold_to_report_anomaly=args.threshold_to_report_anomaly, benchmarkTime=args.benchmark_time)
+			threshold_to_report_anomaly=args.threshold_to_report_anomaly, benchmarkTime=args.benchmark_time,
+			unique=args.unique_files, cleanup=args.cleanup)
+		result = None
 	else:
-		main(args.file_size, args.file_count, args.process_count, args.directory,modes,args.quiet,args.zeros,tl=tl,stealth=args.stealth,message_end_point_address=args.message_end_point_address,no_report=args.no_report,threshold_to_report_anomaly=args.threshold_to_report_anomaly,benchmarkTime=args.benchmark_time)
+		result = main(args.file_size, args.file_count, args.process_count, args.directory,modes,args.quiet,args.zeros,tl=tl,stealth=args.stealth,message_end_point_address=args.message_end_point_address,no_report=args.no_report,threshold_to_report_anomaly=args.threshold_to_report_anomaly,benchmarkTime=args.benchmark_time,unique=args.unique_files,cleanup=args.cleanup)
+	if not args.cleanup and ('write' in modes or 'random' in modes or 'read' in modes):
+		hint = leftover_hint(args.directory, args.process_count, args.file_count)
+		if hint:
+			tl.teeprint(hint)
+	if result is not None and total_failed_ops(result):
+		sys.exit(1)
 	
 if __name__ == "__main__":
 	climain()

@@ -358,7 +358,7 @@ def test_simul_tuning_asymmetric_above_ok_finalizes(iotest_mod, work_dir, rec_tl
 
 
 def test_simul_tuning_cannot_measure_exits(iotest_mod, work_dir, rec_tl, monkeypatch):
-    finalized = _stub_simul(iotest_mod, monkeypatch, {"write": None, "read": None})
+    _stub_simul(iotest_mod, monkeypatch, {"write": None, "read": None})
     with pytest.raises(SystemExit) as ei:
         _call_simul(iotest_mod, work_dir, rec_tl, 1000, 2000)
     assert ei.value.code == 1

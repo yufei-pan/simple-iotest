@@ -1,3 +1,5 @@
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -107,3 +109,50 @@ def run_main(iotest_mod, make_tl, work_dir, tiny):
         return iotest_mod.main(**params)
 
     return _run
+
+
+# Runs in its own process: iotest forks workers, and forking while a server
+# thread is alive in the test process triggers fork-with-threads warnings.
+_WEBHOOK_SERVER = r'''
+import http.server, json, sys
+status, log_path = int(sys.argv[1]), sys.argv[2]
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        headers = {k.lower(): v for k, v in self.headers.items()}
+        with open(log_path, "a") as f:
+            f.write(json.dumps({"headers": headers, "json": json.loads(body)}) + "\n")
+        self.send_response(status)
+        self.end_headers()
+    def log_message(self, *args):
+        pass
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+print(server.server_port, flush=True)
+server.serve_forever()
+'''
+
+
+@pytest.fixture
+def webhook(tmp_path):
+    """Start a local endpoint that records each POST; returns (url, received)."""
+    procs = []
+
+    def _start(status=204):
+        log_path = tmp_path / f"webhook_{len(procs)}.jsonl"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _WEBHOOK_SERVER, str(status), str(log_path)],
+            stdout=subprocess.PIPE, text=True)
+        procs.append(proc)
+        port = int(proc.stdout.readline())
+
+        def received():
+            if not log_path.exists():
+                return []
+            return [json.loads(line) for line in log_path.read_text().splitlines()]
+
+        return f"http://127.0.0.1:{port}/hook", received
+
+    yield _start
+    for proc in procs:
+        proc.kill()
+        proc.wait()
