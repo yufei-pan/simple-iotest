@@ -89,44 +89,126 @@ def test_simultaneous_reader_reuses_one_read_buffer(iotest_mod, work_dir, monkey
 
 
 @pytest.mark.parametrize(
-    "modes,copies",
+    "modes,read_recreates,copies",
     [
-        (["write"], 1),
-        (["index"], 1),
-        (["benchmark"], 1),
-        (["read"], 2),
-        (["write", "read"], 2),
-        (["comprehensive"], 2),
-        (["random"], 2),
+        (["write"], False, 1),
+        (["index"], False, 1),
+        (["benchmark"], False, 1),
+        # read workers hold only their read buffer, unless they have files to recreate
+        (["read"], False, 1),
+        (["read"], True, 2),
+        (["write", "read"], False, 1),
+        (["simultaneous"], False, 1),
+        # these workers write and read, so they hold file content and a read buffer
+        (["comprehensive"], False, 2),
+        (["random"], False, 2),
     ],
 )
-def test_memory_copies_per_mode(iotest_mod, modes, copies):
-    # every worker holds its file content; workers that also read hold a read buffer too
-    assert iotest_mod.memory_copies(modes, 4) == copies
+def test_memory_copies_per_mode(iotest_mod, modes, read_recreates, copies):
+    assert iotest_mod.memory_copies(modes, read_recreates) == copies
 
 
-@pytest.mark.parametrize("write_count,copies", [(None, 1.5), (1, 1.75), (3, 1.25)])
-def test_simultaneous_memory_copies_follow_the_split(iotest_mod, write_count, copies):
-    # writers hold one buffer, readers two; averaged over 4 workers
-    assert iotest_mod.memory_copies(["simultaneous"], 4, write_count) == copies
+@pytest.mark.parametrize(
+    "modes,prepared,expected",
+    [
+        (["read"], True, False),            # every file is there at full size
+        (["read"], False, True),            # fresh directory: read recreates them
+        (["write", "read"], False, False),  # the write pass creates them first
+        (["read", "write"], False, True),   # ...but not when it runs after the read
+        (["write"], False, False),
+    ],
+)
+def test_read_recreates_files(iotest_mod, work_dir, run_main, modes, prepared, expected):
+    if prepared:
+        run_main(["write"], process_count=2, file_count=2)
+    assert iotest_mod.read_recreates_files(modes, [str(work_dir)], 2, 2, 1024) == expected
 
 
-@pytest.mark.parametrize("modes,expected_pc", [(["read"], 2), (["write"], 4)])
-def test_memory_guard_counts_read_buffers(run_main, iotest_mod, monkeypatch, modes, expected_pc):
-    # 6000 B available: 4 workers x 1024 B x 1.2 = 4915 B fits for write-only,
-    # but read workers hold two copies (9830 B), so only 6000 // (1024 x 2 x 1.2) = 2 fit
-    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (6000, 0), raising=False)
-    if modes == ["read"]:
+@pytest.mark.parametrize("prepared,expected_pc", [(True, 4), (False, 2)])
+def test_memory_guard_counts_read_buffers(run_main, iotest_mod, monkeypatch, prepared, expected_pc):
+    # 6000 B available. With every file present, read workers hold only a read buffer:
+    # 4 x 1024 B x 1.2 = 4915 B fits. On a fresh directory they also need content to
+    # recreate the files (9830 B), so only 6000 // (1024 x 2 x 1.2) = 2 fit
+    if prepared:
         run_main(["write"], process_count=4)
-    result = run_main(modes, process_count=4)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (6000, 0))
+    result = run_main(["read"], process_count=4)
     assert result["process_count"] == expected_pc
 
 
 def test_memory_cut_keeps_at_least_one_simultaneous_reader(run_main, iotest_mod, monkeypatch):
-    # 3 writers + 1 reader average 1.25 copies: 4600 // (1024 x 1.25 x 1.2) = 2 processes fit,
+    # every simultaneous worker holds one buffer: 3000 // (1024 x 1.2) = 2 processes fit,
     # fewer than the 3 writers asked for; the split must shrink to 1 + 1, not fail with 0 readers
     monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
-    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (4600, 0))
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (3000, 0))
     result = run_main(["simultaneous"], process_count=4, simultaneous_write_count=3)
     assert result["process_count"] == 2
     assert result["mode_process_counts"] == {"write": 1, "read": 1}
+
+
+def test_read_worker_holds_only_its_read_buffer(iotest_mod, work_dir):
+    iotest_mod.worker(2, 4 * MiB, str(work_dir), [], "write", "0", True, True, 0)
+    # every file exists, so no random content is generated for recreating them
+    peak = traced_peak(iotest_mod.worker, 2, 4 * MiB, str(work_dir), [], "read", "0", True, False, 0)
+    assert peak < 1.5 * 4 * MiB
+
+
+def test_read_worker_recreates_missing_files_on_demand(iotest_mod, work_dir):
+    results = []
+    iotest_mod.worker(2, 4096, str(work_dir), results, "read", "0", True, False, 0)
+    assert len(results) == 2 and not any(isinstance(r, str) for r in results)
+    assert [p.stat().st_size for p in sorted((work_dir / "0").glob("temp_*.bin"))] == [4096, 4096]
+
+
+def test_index_worker_holds_no_file_data(iotest_mod, work_dir):
+    peak = traced_peak(iotest_mod.worker, 2, 4 * MiB, str(work_dir), [], "index", "0", True, False, 0)
+    assert peak < 0.5 * 4 * MiB
+
+
+def test_simultaneous_reader_holds_only_its_read_buffer(iotest_mod, work_dir, rec_tl):
+    iotest_mod.run_simultaneous_layout(2, 4 * MiB, [str(work_dir)], "t", 1, 1, True, True, rec_tl)
+    peak = traced_peak(iotest_mod.simultaneous_role_worker,
+        "read", 2, 4 * MiB, str(work_dir), "t", "0", [], True, False, 0)
+    assert peak < 1.5 * 4 * MiB
+
+
+@pytest.mark.parametrize(
+    "modes,prepared,skipped",
+    [
+        (["read"], True, True),
+        # a fresh directory: read workers generate content to recreate files up front
+        (["read"], False, False),
+        (["index"], False, True),
+        (["write"], False, False),
+        (["write", "read"], False, False),
+    ],
+)
+def test_generation_benchmark_runs_only_when_workers_generate_data(run_main, rec_tl, modes, prepared, skipped):
+    # it estimates how long workers take to generate their data before the start barrier
+    if prepared:
+        run_main(["write"])
+    run_main(modes, tl=rec_tl)
+    assert any("Skipping file generation benchmark" in m for m in rec_tl.printed) == skipped
+
+
+def test_read_worker_that_will_recreate_generates_before_the_start_barrier(iotest_mod, work_dir, monkeypatch):
+    # generating inside the timed window would count CPU work as read time
+    made_at = []
+    real = iotest_mod.make_file_content
+    monkeypatch.setattr(iotest_mod, "make_file_content",
+        lambda *a, **k: made_at.append(iotest_mod.time.perf_counter()) or real(*a, **k))
+    start = iotest_mod.time.perf_counter() + 0.3
+    iotest_mod.worker(1, 4096, str(work_dir), [], "read", "0", True, True, start, False, True)
+    assert len(made_at) == 1
+    assert made_at[0] < start
+
+
+def test_memory_cut_that_changes_padding_recounts_recreated_files(run_main, iotest_mod, monkeypatch):
+    # a -pc 12 write leaves 00..11. 11100 B fits 9 read-only workers (1 x 1024 x 1.2 each), but
+    # at -pc 9 the padding is 0..8, those files are missing, and each worker would also hold
+    # content to recreate them: 11100 // (1024 x 2 x 1.2) = 4
+    run_main(["write"], process_count=12)
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (11100, 0))
+    result = run_main(["read"], process_count=12)
+    assert result["process_count"] == 4

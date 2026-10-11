@@ -262,3 +262,40 @@ def test_each_directory_is_checked_against_its_own_free_space(run_main, tmp_path
         lambda path: types.SimpleNamespace(total=free[str(path)], used=0, free=free[str(path)]))
     with pytest.raises(SystemExit):
         run_main(["write"], process_count=2, directory=[str(d2), str(d1)])
+
+
+def test_tuning_cleanup_covers_an_attempt_that_did_not_finish(iotest_mod, work_dir, rec_tl, tiny, monkeypatch):
+    # the attempt's workers have written their files when the report step fails (Ctrl+C,
+    # ENOSPC writing the report, ...); -cl must still remove them
+    def broken_report(*a, **k):
+        raise RuntimeError("report failed")
+    monkeypatch.setattr(iotest_mod, "calc_iops", broken_report)
+    with pytest.raises(RuntimeError):
+        iotest_mod.tune_for_targets(1024, 2, 2, str(work_dir), ["write"], True, True, rec_tl,
+            1, None, no_report=True, benchmarkTime=tiny["benchmarkTime"], cleanup=True)
+    assert temp_files(work_dir) == []
+
+
+def test_tuning_warns_about_snapshots_once_before_it_starts(run_main, iotest_mod, work_dir, rec_tl, monkeypatch, tiny):
+    run_main(["write"])
+    lines = [ROOT, mountinfo_line(os.path.realpath(work_dir), "btrfs", "/dev/sdb")]
+    monkeypatch.setattr(iotest_mod, "read_mountinfo", lambda: lines)
+    fake_free(iotest_mod, monkeypatch, 0)
+    iotest_mod.tune_for_targets(1024, 1, 1, str(work_dir), ["write"], True, True, rec_tl,
+        1, None, no_report=True, benchmarkTime=tiny["benchmarkTime"])
+    assert sum("snapshot" in m for m in rec_tl.messages) == 1
+
+
+def test_snapshot_warning_counts_directories_that_share_a_pool(run_main, tmp_path, iotest_mod, monkeypatch, rec_tl):
+    # each subvolume alone fits with its rewrite headroom (1024 B <= 0.95 x 1500 B),
+    # but together they need 2048 B of the same 1500 B
+    d1, d2 = tmp_path / "d1", tmp_path / "d2"
+    d1.mkdir()
+    d2.mkdir()
+    run_main(["write"], process_count=2, directory=[str(d1), str(d2)])
+    lines = [ROOT, mountinfo_line(str(d1), "btrfs", "/dev/sdb"), mountinfo_line(str(d2), "btrfs", "/dev/sdb")]
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (-1, -1))
+    monkeypatch.setattr(iotest_mod, "read_mountinfo", lambda: lines)
+    fake_free(iotest_mod, monkeypatch, 1500)
+    run_main(["write"], process_count=2, directory=[str(d1), str(d2)], tl=rec_tl)
+    assert any("snapshot" in m for m in rec_tl.messages)

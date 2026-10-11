@@ -283,6 +283,26 @@ def new_stamp_id():
 	# rebuild the exact blocks of files an earlier run left on the same storage
 	return int.from_bytes(os.urandom(8), 'little')
 
+class RecreateContent:
+	# content for files read_file has to recreate: made on first use (or by prepare), then
+	# reused, so read workers whose files all exist never hold a second buffer
+	def __init__(self, file_size, zeros, unique, stamp_id):
+		self.file_size = file_size
+		self.zeros = zeros
+		self.unique = unique
+		self.stamp_id = stamp_id
+		self.content = None
+
+	def prepare(self):
+		if self.content is None:
+			self.content = make_file_content(self.file_size, self.zeros, self.unique)
+
+	def for_file(self, index):
+		self.prepare()
+		if self.unique:
+			stamp_unique(self.content, self.stamp_id, index)
+		return self.content
+
 def make_file_content(file_size, zeros, unique):
 	if zeros:
 		# stamp_unique edits the buffer in place, so -u needs a mutable one
@@ -342,7 +362,7 @@ def move_file(src, dst, quiet=False):
 def file_needs_recreate(file_name, file_size):
 	return not os.path.isfile(file_name) or os.path.getsize(file_name) != file_size
 
-def read_file(file_name, file_content, file_size, quiet=False, buffer=None, before_recreate=None):
+def read_file(file_name, file_content, file_size, quiet=False, buffer=None, recreate_content=None):
 	# workers pass one reused buffer; a fresh one costs a zero-fill per read (~150 ms/GiB)
 	b = buffer if buffer is not None else bytearray(file_size)
 	# check if file exists and size is correct
@@ -350,8 +370,9 @@ def read_file(file_name, file_content, file_size, quiet=False, buffer=None, befo
 		if file_needs_recreate(file_name, file_size):
 			# file does not exist or size is wrong, create it
 			worker_log(f"File {file_name} does not exist or size is wrong, creating it...", level='error', quiet=quiet)
-			if before_recreate is not None:
-				before_recreate()
+			# read-only workers hold no content until a file actually has to be recreated
+			if recreate_content is not None:
+				file_content = recreate_content()
 			created = create_file(file_name, file_content, file_size, quiet=quiet)
 			if created[0] is None:
 				# report why the file is missing, not the read error that would follow
@@ -442,13 +463,19 @@ def int_to_color(n, brightness_threshold=500):
 		return int_to_color(hash_value, brightness_threshold)
 	return (r, g, b)
 
-def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False):
+def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False):
 	local_results = []
 	r, g, b = int_to_color(os.getpid())
 	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} scheduled to start at {thread_start_time-time.perf_counter():.4f} later in {mode} mode.' + '\033[0m', quiet=quiet)
-	file_content = make_file_content(file_size, zeros, unique)
+	writes = mode in ('write', 'random', 'comprehensive')
+	# read workers create content only if a file must be recreated; index never needs any
+	file_content = make_file_content(file_size, zeros, unique) if writes else None
 	stamp_id = new_stamp_id()
-	stamp_files = unique and mode in ('write', 'random', 'comprehensive')
+	stamp_files = unique and writes
+	recreate_content = RecreateContent(file_size, zeros, unique, stamp_id)
+	if recreates and mode == 'read':
+		# files are missing: make the content now, before the start barrier, not in the timed window
+		recreate_content.prepare()
 	read_buffer = bytearray(file_size) if mode in ('read', 'random', 'comprehensive') else None
 	if time.perf_counter() > thread_start_time:
 		worker_log(f'Worker {counter} started late, expected start time {thread_start_time}, actual start time {time.perf_counter()}', level='error', quiet=quiet)
@@ -466,15 +493,14 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		file_name = worker_file_path(directory, counter, i, file_count)
 		if stamp_files:
 			stamp_unique(file_content, stamp_id, i)
-		# -u read: stamp a file only when read_file is about to recreate it
-		before_recreate = functools.partial(stamp_unique, file_content, stamp_id, i) if unique and mode == 'read' else None
+		recreate = functools.partial(recreate_content.for_file, i) if mode == 'read' else None
 		i = str(i+1).zfill(len(str(file_count)))
 		if mode == 'write':
 			write_time = op_time(create_file(file_name, file_content, file_size, quiet=quiet))
 			local_results.append(write_time)
 			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\t{format_op(write_time)}"+ '\033[0m', quiet=quiet)
 		elif mode == 'read':
-			read_time = op_time(read_file(file_name, file_content, file_size, quiet, buffer=read_buffer, before_recreate=before_recreate))
+			read_time = op_time(read_file(file_name, file_content, file_size, quiet, buffer=read_buffer, recreate_content=recreate))
 			local_results.append(read_time)
 			worker_log(f'\033[38;2;{r};{g};{b}m' +f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\t{format_op(read_time)}"+ '\033[0m', quiet=quiet)
 		elif mode == 'random':
@@ -606,16 +632,23 @@ def check_free_space(needed_by_dir, tl, mountinfo_lines=None, cow_extra=None):
 			tl.teelog(f"Warning: {directory} is copy-on-write; rewriting the existing test files frees their "
 				f"old blocks only if no snapshot holds them. If one does, this run needs up to "
 				f"{format_bytes(needed + cow_extra[directory])}B ({format_bytes(free)}B free).", level='warning')
-		pool = pools.setdefault(space_pool(directory, mountinfo_lines), [0, 0, []])
+		pool = pools.setdefault(space_pool(directory, mountinfo_lines), [0, 0, [], 0])
 		pool[0] += needed
 		pool[1] = max(pool[1], free)
 		pool[2].append(directory)
+		pool[3] += cow_extra.get(directory, 0) if cow_extra else 0
 	# ...and together, when several directories draw on one pool
-	for needed, free, dirs in pools.values():
-		if len(dirs) > 1 and needed > free * FREE_SPACE_MARGIN:
+	for needed, free, dirs, extra in pools.values():
+		if len(dirs) < 2:
+			continue
+		if needed > free * FREE_SPACE_MARGIN:
 			tl.teeerror(f"Not enough free space for {', '.join(dirs)}, which share their free space: "
 				f"this run needs {format_bytes(needed)}B, {format_bytes(free)}B free ({spare}).")
 			enough = False
+		elif extra and needed + extra > free * FREE_SPACE_MARGIN:
+			tl.teelog(f"Warning: {', '.join(dirs)} share copy-on-write free space; rewriting the existing "
+				f"test files frees their old blocks only if no snapshot holds them. If one does, this run "
+				f"needs up to {format_bytes(needed + extra)}B ({format_bytes(free)}B free).", level='warning')
 	if not enough:
 		tl.teeerror("Nothing was written. Reduce -fs, -fc or -pc (or use -ts) and try again.")
 	return enough
@@ -671,8 +704,10 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 	local_results = []
 	r, g, b = int_to_color(os.getpid())
 	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} ({role}) scheduled to start at {thread_start_time-time.perf_counter():.4f} later.' + '\033[0m', quiet=quiet)
-	file_content = make_file_content(file_size, zeros, unique)
+	# readers read the layout's files and create content only if one must be recreated
+	file_content = make_file_content(file_size, zeros, unique) if role == 'write' else None
 	stamp_id = new_stamp_id()
+	recreate_content = RecreateContent(file_size, zeros, unique, stamp_id)
 	while time.perf_counter() < thread_start_time:
 		time.sleep(0.001)
 	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
@@ -689,8 +724,8 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 			local_results.append(op)
 			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tWrote\t{format_op(op)}" + '\033[0m', quiet=quiet)
 		else:
-			before_recreate = functools.partial(stamp_unique, file_content, stamp_id, i) if unique else None
-			op = op_time(read_file(file_name, file_content, file_size, quiet, buffer=read_buffer, before_recreate=before_recreate))
+			op = op_time(read_file(file_name, file_content, file_size, quiet, buffer=read_buffer,
+				recreate_content=functools.partial(recreate_content.for_file, i)))
 			local_results.append(op)
 			worker_log(f'\033[38;2;{r};{g};{b}m' + f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tRead\t{format_op(op)}" + '\033[0m', quiet=quiet)
 	worker_log(f'\033[38;2;{r};{g};{b}m' + f'Worker {counter} ({role}) finished.' + '\033[0m', quiet=quiet)
@@ -859,14 +894,21 @@ def send_short_reports(message_end_point_address, short_reports, tl):
 			tl.teeerror(f"Failed to send short report to {host}: {e}{skipped_note}")
 			return
 
-def memory_copies(modes, process_count=1, simultaneous_write_count=None):
-	# every worker holds its file content; workers that also read hold a read buffer too
-	if any(mode in ('read', 'random', 'comprehensive') for mode in modes):
+def read_recreates_files(modes, directories, process_count, file_count, file_size):
+	# a read pass needs file content only to recreate missing or wrong-size files, and
+	# not for files an earlier write/random pass of this run creates first
+	if 'read' not in modes:
+		return False
+	if any(mode in ('write', 'random') for mode in modes[:modes.index('read')]):
+		return False
+	return any(file_needs_recreate(path, file_size)
+		for _, _, path in worker_files(directories, process_count, file_count))
+
+def memory_copies(modes, read_recreates=False):
+	# each worker holds one buffer: its file content (writers) or its read buffer (readers,
+	# simultaneous ones included). Workers that also write or recreate files hold both.
+	if any(mode in ('random', 'comprehensive') for mode in modes) or ('read' in modes and read_recreates):
 		return 2
-	if 'simultaneous' in modes and process_count > 0:
-		# writers hold one copy, readers two
-		writers = simultaneous_write_count if simultaneous_write_count is not None else process_count // 2
-		return (writers + 2 * (process_count - writers)) / process_count
 	return 1
 
 def read_meminfo():
@@ -974,7 +1016,8 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 	failedOps = {}
 	totalTime = {}
 	mode_process_counts = {}
-	memoryPerProcess = file_size * memory_copies(modes, process_count, simultaneous_write_count) * 1.2
+	read_recreates = read_recreates_files(modes, directories, process_count, file_count, file_size)
+	memoryPerProcess = file_size * memory_copies(modes, read_recreates) * 1.2
 	estimatedTotalMemory = memoryPerProcess * process_count
 	if modes == ['benchmark']:
 		file_count = 0
@@ -990,6 +1033,12 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 		tl.teeerror(f"Swap available memory: {format_bytes(swapMemory)}B")
 		tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
 		process_count = max(int((phyFreeMemory + swapMemory) // memoryPerProcess), 1)
+		# a smaller count can change the counter padding (00..11 -> 0..8): the files read
+		# expects may now be missing, and recreating them needs a second buffer per worker
+		if not read_recreates and read_recreates_files(modes, directories, process_count, file_count, file_size):
+			read_recreates = True
+			memoryPerProcess = file_size * memory_copies(modes, read_recreates) * 1.2
+			process_count = max(int((phyFreeMemory + swapMemory) // memoryPerProcess), 1)
 		tl.teeerror(f"Reducing the number of processes to {process_count}")
 	if 'simultaneous' in modes and simultaneous_write_count is not None and simultaneous_write_count > process_count - 1 >= 1:
 		# the memory check may have cut process_count below the requested split
@@ -1002,6 +1051,10 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 		skip_layout=simultaneous_skip_layout, mountinfo_lines=mountinfo)
 	if not check_free_space(needed, tl, mountinfo, cow_extra=None if tuning_attempt else cow_extra):
 		sys.exit(1)
+	# recorded before any worker writes, so -cl after tuning also covers an attempt that
+	# never finished (Ctrl+C, a failing report write, ...)
+	if any(mode in ('write', 'read', 'random', 'comprehensive', 'index') for mode in modes):
+		worker_runs.add(process_count)
 	if phyFreeMemory > 0 and estimatedTotalMemory > phyFreeMemory * 0.9:
 		tl.teeerror("Estimated total memory usage is more than 90% of the total non swap available memory.")
 		tl.teeerror("You may want to reduce the file size or the number of processes.")
@@ -1030,6 +1083,12 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			genTimeCalc = 0
 			processStartDelay = 0.005 * process_count + 1
 			tl.teeprint("Skipping file generation benchmark (no write workers in simultaneous mode)")
+		elif all(mode in ('read', 'index') for mode in modes) and not read_recreates:
+			# it estimates how long workers take to generate data before the start barrier
+			genSpeed = 0
+			genTimeCalc = 0
+			processStartDelay = 0.005 * process_count + 1
+			tl.teeprint("Skipping file generation benchmark (read and index workers generate no data up front)")
 		else:
 			if zeros:
 				generator = 'zeros'
@@ -1128,7 +1187,7 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			for counter in range(process_count):
 				assigned_directory = directories[counter % len(directories)]
 				counter = worker_counter_name(counter, process_count)
-				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique))
+				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, read_recreates))
 				processes.append(p)
 			totalStartTime = thread_start_time
 			for p in processes:
@@ -1257,8 +1316,6 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 			f.write('\n'.join(report))
 		tl.teeprint(f"Report written to {report_file_name}")
 		print(f"Log file: {tl.logFileName}")
-	if any(mode in ('write', 'read', 'random', 'comprehensive', 'index') for mode in modes):
-		worker_runs.add(process_count)
 	if cleanup:
 		cleanup_worker_files(directories, process_count, file_count)
 	if message_end_point_address and short_reports:
@@ -1660,6 +1717,14 @@ def tune_simultaneous(file_size, file_count, process_count, directory, modes, qu
 def tune_for_targets(file_size, file_count, process_count, directory, modes, quiet, zeros, tl,
 		write_target, read_target, stealth=False, message_end_point_address=None, no_report=False,
 		threshold_to_report_anomaly=0, benchmarkTime=5, unique=False, cleanup=False):
+	if 'simultaneous' not in modes:
+		# once up front: attempts check space quietly; tune_simultaneous checks its own layout
+		directories = normalize_directories(directory)
+		for output_dir in directories:
+			os.makedirs(output_dir, exist_ok=True)
+		needed, cow_extra = space_needed(modes, file_size, file_count, process_count, directories)
+		if not check_free_space(needed, tl, cow_extra=cow_extra):
+			sys.exit(1)
 	# clean up once at the end: deleting files between attempts would make the next
 	# read attempt recreate them inside its timed pass
 	worker_runs.clear()
