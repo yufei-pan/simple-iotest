@@ -141,7 +141,7 @@ def webhook(tmp_path):
         log_path = tmp_path / f"webhook_{len(procs)}.jsonl"
         proc = subprocess.Popen(
             [sys.executable, "-c", _WEBHOOK_SERVER, str(status), str(log_path)],
-            stdout=subprocess.PIPE, text=True)
+            stdout=subprocess.PIPE, universal_newlines=True)
         procs.append(proc)
         port = int(proc.stdout.readline())
 

@@ -22,8 +22,8 @@ def test_package_name_console_script_alias():
 def run_iotest(args, cwd=None):
     return subprocess.run(
         [sys.executable, str(MODULE), *args],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        universal_newlines=True,
         check=False,
         cwd=cwd,
     )

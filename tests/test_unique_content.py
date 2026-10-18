@@ -57,7 +57,7 @@ def test_cli_unique_flag(tmp_path):
     proc = subprocess.run(
         [sys.executable, str(MODULE), "-fs", "8k", "-fc", "2", "-pc", "1", "-d", str(work),
          "-nl", "-nr", "-bt", "1", "-u", "write"],
-        capture_output=True, text=True, check=False)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=False)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     first, second = worker_files(work)
     assert blocks(first).isdisjoint(blocks(second))

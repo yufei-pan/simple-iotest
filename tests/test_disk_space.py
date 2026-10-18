@@ -72,7 +72,7 @@ def test_cleanup_keeps_files_it_did_not_create(run_main, work_dir):
 
 
 def run_cli(*args):
-    return subprocess.run([sys.executable, str(MODULE), *args], capture_output=True, text=True, check=False)
+    return subprocess.run([sys.executable, str(MODULE), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=False)
 
 
 def test_without_cleanup_files_stay_and_a_hint_is_printed(tmp_path):
@@ -113,7 +113,7 @@ def test_cli_cleanup_flag(tmp_path):
     proc = subprocess.run(
         [sys.executable, str(MODULE), "-fs", "1k", "-fc", "2", "-pc", "1", "-d", str(work),
          "-nl", "-nr", "-z", "-bt", "1", "-cl", "write"],
-        capture_output=True, text=True, check=False)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=False)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert list(work.iterdir()) == []
 
