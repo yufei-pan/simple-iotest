@@ -58,16 +58,16 @@ Example:
 iotest -fs 50m -fc 100 -pc 4 -d /tmp/iotest write read
 ```
 Will launch 4 processes each write same random 50MiB size data to 100 seperate files sequentially.
-
-### Measurement notes
-- Page cache: after each write is synced, iotest drops the file's pages (`posix_fadvise(DONTNEED)`) and before each read it does the same, so results reflect the storage. On macOS, which has no `posix_fadvise`, `F_NOCACHE` is set on every test file instead. On Windows neither exists, so reads may be served from cache.
-- Late starts: workers wait for a common start time. If some reach it late (for example, a slow start under heavy load), the report adds a line such as `Late starts:  3 of 36 workers, up to 0.0412 s late (sync figures include the delay)` and a warning is logged, even without `-v`. The returned result also carries them as `late_starts`.
 Then will launch another 4 processes reading the same files.
 
 Simultaneous read/write example:
 ```bash
 iotest -fs 50m -fc 20 -pc 8 -d /tmp/iotest simultaneous
 ```
+
+### Measurement notes
+- Page cache: after each write is synced, iotest drops the file's pages (`posix_fadvise(DONTNEED)`) and before each read it does the same, so results reflect the storage. On macOS, which has no `posix_fadvise`, `F_NOCACHE` is set on every test file instead. On Windows neither exists, so reads may be served from cache.
+- Late starts: workers wait for a common start time. If some reach it late (for example, a slow start under heavy load), the report adds a line such as `Late starts:  3 of 36 workers, up to 0.0412 s late (sync figures include the delay)` and a warning is logged, even without `-v`. The returned result also carries them as `late_starts`.
 
 ### Exit codes
 - `0`: the run completed and every operation succeeded.
