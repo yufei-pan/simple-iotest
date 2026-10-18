@@ -355,7 +355,8 @@ def test_simultaneous_tuning_lays_out_with_the_block_size(iotest_mod, work_dir, 
     seen = []
 
     def spy(*args):
-        seen.append(args[-1])
+        # block_size, then verify
+        seen.append(args[-2])
         raise Stop
 
     monkeypatch.setattr(iotest_mod, "run_simultaneous_layout", spy)
