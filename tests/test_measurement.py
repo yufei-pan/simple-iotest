@@ -2,6 +2,8 @@ import os
 
 import pytest
 
+import iotest as iotest_module
+
 
 def test_fadvise_runs_after_fsync_and_not_before_the_write(iotest_mod, tmp_path, monkeypatch):
     if not hasattr(os, "posix_fadvise"):
@@ -39,6 +41,7 @@ def test_fadvise_is_not_part_of_the_timed_write(iotest_mod, tmp_path, monkeypatc
     assert marks == [102]
 
 
+@pytest.mark.skipif(iotest_module.fcntl is None, reason="fcntl is not available on Windows")
 @pytest.mark.parametrize("op", ["write", "read"])
 def test_f_nocache_is_set_when_the_constant_exists(iotest_mod, tmp_path, monkeypatch, op):
     target = tmp_path / "f.bin"
@@ -53,6 +56,7 @@ def test_f_nocache_is_set_when_the_constant_exists(iotest_mod, tmp_path, monkeyp
     assert seen == [(48, 1)]
 
 
+@pytest.mark.skipif(iotest_module.fcntl is None, reason="fcntl is not available on Windows")
 def test_f_nocache_is_skipped_without_the_constant(iotest_mod, tmp_path, monkeypatch):
     seen = []
     if hasattr(iotest_mod.fcntl, "F_NOCACHE"):

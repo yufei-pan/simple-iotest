@@ -1306,9 +1306,10 @@ def write_timeline(timeline_rows):
 			writer.writerow(list(row[:5]) + ['%.6f' % row[5], '' if row[6] is None else '%.6f' % row[6], row[7]])
 	return write
 
-def write_report_file(path, write_content, tl, report_errors):
+def write_report_file(path, write_content, tl, report_errors, newline=None):
 	try:
-		with open(path, "w") as f:
+		# csv writes its own line endings, so it needs newline='' to avoid \r\r\n on Windows
+		with open(path, "w", newline=newline) as f:
 			write_content(f)
 	except OSError as e:
 		message = f"Could not write {path}: {e}"
@@ -1792,7 +1793,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		if write_report_file(report_file_name, lambda f: f.write('\n'.join(report)), tl, report_errors):
 			tl.teeprint(f"Report written to {report_file_name}")
 		ops_file_name = report_base + REPORT_SUFFIXES[2]
-		if write_report_file(ops_file_name, write_timeline(timeline_rows), tl, report_errors):
+		if write_report_file(ops_file_name, write_timeline(timeline_rows), tl, report_errors, newline=''):
 			tl.teeprint(f"Timeline written to {ops_file_name}")
 		print(f"Log file: {tl.logFileName}")
 	if options.json_path:

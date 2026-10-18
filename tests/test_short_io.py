@@ -20,6 +20,7 @@ def short_readv(fd, buffers):
     return len(data)
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 def test_create_file_finishes_partial_writes(iotest_mod, tmp_path, monkeypatch):
     content = os.urandom(2500)
     target = tmp_path / "f.bin"
@@ -29,6 +30,7 @@ def test_create_file_finishes_partial_writes(iotest_mod, tmp_path, monkeypatch):
     assert target.read_bytes() == content
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 def test_create_file_fallback_continues_after_partial_progress(iotest_mod, tmp_path, monkeypatch):
     content = os.urandom(2500)
     target = tmp_path / "f.bin"
@@ -47,6 +49,7 @@ def test_create_file_fallback_continues_after_partial_progress(iotest_mod, tmp_p
     assert target.read_bytes() == content
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 def test_create_file_no_progress_is_a_failure(iotest_mod, tmp_path, monkeypatch):
     target = tmp_path / "f.bin"
     monkeypatch.setattr(iotest_mod.os, "writev", lambda fd, buffers: 0)
@@ -55,6 +58,7 @@ def test_create_file_no_progress_is_a_failure(iotest_mod, tmp_path, monkeypatch)
     assert str(target) in op
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 def test_read_file_finishes_partial_reads(iotest_mod, tmp_path, monkeypatch):
     content = os.urandom(2500)
     target = tmp_path / "f.bin"
@@ -72,6 +76,7 @@ def test_read_file_finishes_partial_reads(iotest_mod, tmp_path, monkeypatch):
     assert sum(consumed) == 2500
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 def test_read_file_early_eof_is_a_failure(iotest_mod, tmp_path, monkeypatch):
     target = tmp_path / "f.bin"
     target.write_bytes(b"\x01" * 64)
@@ -81,6 +86,7 @@ def test_read_file_early_eof_is_a_failure(iotest_mod, tmp_path, monkeypatch):
     assert str(target) in op
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 def test_each_syscall_is_capped_at_max_io_chunk(iotest_mod, tmp_path, monkeypatch):
     # macOS rejects a single read/write over INT_MAX with EINVAL instead of
     # transferring part of it, so iotest must never ask for more than the cap
@@ -106,6 +112,7 @@ def test_each_syscall_is_capped_at_max_io_chunk(iotest_mod, tmp_path, monkeypatc
     assert requested == [1024, 1024, 452, 1024, 1024, 452]
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 @pytest.mark.parametrize("call,op", [("posix_fadvise", "write"), ("writev", "write"), ("readv", "read")])
 def test_ctrl_c_during_io_is_not_swallowed(iotest_mod, tmp_path, monkeypatch, call, op):
     # the posix_fadvise warning and the f.write / f.readinto fallbacks catch only OSError

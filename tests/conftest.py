@@ -16,6 +16,21 @@ except ImportError:
     Tee_Logger = iotest_module.Tee_Logger  # noqa: E402
 
 
+def pytest_collection_modifyitems(config, items):
+    # macOS and Windows start workers with spawn, so what a test patches in this process never reaches
+    # them. macOS can fork instead (see below); Windows cannot, so the tests that rely on it are skipped there.
+    if sys.platform == "win32":
+        skip = pytest.mark.skip(reason="patches do not reach spawned workers on Windows")
+        for item in items:
+            if {"monkeypatch", "run_main"} <= set(item.fixturenames):
+                item.add_marker(skip)
+
+
+if sys.platform == "darwin":
+    import multiprocessing
+    multiprocessing.set_start_method("fork", force=True)
+
+
 @pytest.fixture
 def iotest_mod():
     return iotest_module

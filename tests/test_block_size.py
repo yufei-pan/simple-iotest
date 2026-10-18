@@ -107,6 +107,7 @@ def spy_calls(monkeypatch, iotest_mod, name, real, sizes):
     monkeypatch.setattr(iotest_mod.os, name, spy)
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 def test_create_file_writes_block_sized_calls(iotest_mod, tmp_path, monkeypatch):
     block = os.urandom(1000)
     target = tmp_path / "f.bin"
@@ -118,6 +119,7 @@ def test_create_file_writes_block_sized_calls(iotest_mod, tmp_path, monkeypatch)
     assert target.read_bytes() == block * 2 + block[:500]
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 def test_read_file_reads_the_whole_file_in_block_sized_calls(iotest_mod, tmp_path, monkeypatch):
     content = os.urandom(2500)
     target = tmp_path / "f.bin"
@@ -131,6 +133,7 @@ def test_read_file_reads_the_whole_file_in_block_sized_calls(iotest_mod, tmp_pat
     assert bytes(buffer[:500]) == content[2000:]
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 def test_blocks_larger_than_max_io_chunk_are_still_split(iotest_mod, tmp_path, monkeypatch):
     content = os.urandom(1000)
     target = tmp_path / "f.bin"
@@ -143,6 +146,7 @@ def test_blocks_larger_than_max_io_chunk_are_still_split(iotest_mod, tmp_path, m
     assert sizes == [512, 488, 512, 488, 500] * 2
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 def test_chunked_io_finishes_short_transfers(iotest_mod, tmp_path, monkeypatch):
     # like tests/test_short_io.py: each call moves at most 300 bytes, less than a block
     def short_writev(fd, buffers):
@@ -319,6 +323,7 @@ def test_block_size_at_least_the_file_size_is_unset(iotest_mod):
     assert iotest_mod.effective_block_size(1000, 4096) == 1000
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 @pytest.mark.parametrize("block_size", [4096, 8192])
 def test_block_size_at_least_the_file_size_makes_the_same_calls_as_unset(run_main, iotest_mod, monkeypatch, tmp_path, block_size):
     def logged(kind, real):

@@ -1,6 +1,9 @@
 import os
+import sys
 
 import pytest
+
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="parses Linux /proc/self/mountinfo with POSIX paths")
 
 
 def mountinfo_line(mount_point, fstype, source):

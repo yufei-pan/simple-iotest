@@ -184,6 +184,7 @@ def mountinfo_line(mount_point, fstype, source):
 ROOT = mountinfo_line("/", "ext4", "/dev/sda1")
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="parses Linux /proc/self/mountinfo with POSIX paths")
 @pytest.mark.parametrize(
     "a,b,same",
     [
@@ -200,6 +201,7 @@ def test_space_pool(iotest_mod, a, b, same):
     assert (iotest_mod.space_pool(a[0], lines) == iotest_mod.space_pool(b[0], lines)) == same
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="parses Linux /proc/self/mountinfo with POSIX paths")
 def test_free_space_is_checked_per_pool(run_main, tmp_path, iotest_mod, monkeypatch):
     # two directories on different btrfs filesystems: each has its own free space
     d1, d2 = tmp_path / "d1", tmp_path / "d2"
@@ -235,6 +237,7 @@ def test_simultaneous_attempts_rely_on_the_tuners_upfront_check(iotest_mod, work
     assert len(result["outResults"]["write"]) == 1
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="parses Linux /proc/self/mountinfo with POSIX paths")
 def test_rewrites_on_copy_on_write_filesystems_warn_instead_of_refusing(run_main, work_dir, iotest_mod, monkeypatch, rec_tl):
     # on btrfs/ZFS a rewrite frees the old blocks only if no snapshot holds them: a run that
     # fits only under that assumption goes ahead with a warning; one that cannot fit is refused
@@ -254,6 +257,7 @@ def test_rewrites_on_copy_on_write_filesystems_warn_instead_of_refusing(run_main
         run_main(["write"])
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="parses Linux /proc/self/mountinfo with POSIX paths")
 def test_each_directory_is_checked_against_its_own_free_space(run_main, tmp_path, iotest_mod, monkeypatch):
     # same btrfs pool, but d1 is limited (qgroup / ZFS quota): it must not borrow d2's room
     d1, d2 = tmp_path / "d1", tmp_path / "d2"
@@ -281,6 +285,7 @@ def test_tuning_cleanup_covers_an_attempt_that_did_not_finish(iotest_mod, work_d
     assert temp_files(work_dir) == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="parses Linux /proc/self/mountinfo with POSIX paths")
 def test_tuning_warns_about_snapshots_once_before_it_starts(run_main, iotest_mod, work_dir, rec_tl, monkeypatch, tiny):
     run_main(["write"])
     lines = [ROOT, mountinfo_line(os.path.realpath(work_dir), "btrfs", "/dev/sdb")]
@@ -292,6 +297,7 @@ def test_tuning_warns_about_snapshots_once_before_it_starts(run_main, iotest_mod
     assert sum("snapshot" in m for m in rec_tl.messages) == 1
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="parses Linux /proc/self/mountinfo with POSIX paths")
 def test_snapshot_warning_counts_directories_that_share_a_pool(run_main, tmp_path, iotest_mod, monkeypatch, rec_tl):
     # each subvolume alone fits with its rewrite headroom (1024 B <= 0.95 x 1500 B),
     # but together they need 2048 B of the same 1500 B
