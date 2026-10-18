@@ -26,7 +26,7 @@ def test_json_summary_for_write_and_read(run_main, rec_tl, iotest_mod, tmp_path,
     assert data["options"] == {
         "file_size": 1024, "file_count": 1, "process_count": 1, "directories": [str(work_dir)],
         "modes": ["write", "read", "index"], "zeros": True, "unique": False, "start_at": None,
-        "block_size": None, "verify": False,
+        "block_size": None, "verify": False, "timeline": False,
     }
     assert list(data["results"]) == ["write", "read", "index"]
     for key in ("write", "read"):

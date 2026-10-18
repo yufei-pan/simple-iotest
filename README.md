@@ -4,7 +4,7 @@ Ever feel like fio is too complicated and too optimized? Well, simple-iotest cov
 
 Using the most simple non-optimized write() or writev() with fallback to python f.write() (just like your code!) to test file system io performance.
 
-Warning: if using big file sizes, make sure you have enough memory to hold all these bits! (Or use `-bs`: each worker then holds one block instead of a whole file.)
+Warning: if using big file sizes, make sure you have enough memory to hold all these bits! (Or use `-bs`: each worker then holds one block instead of a whole file.) Before it starts, iotest estimates the memory the run needs: each worker's data buffers, plus about 200 bytes per operation for the results it keeps until the run ends, and about 160 more per operation with `-tl`. If that is more than the available memory plus swap, it lowers the process count; if it is more than 90% of the available memory, it warns and waits 15 seconds before going on.
 
 Note:
 	Tee_Logger is a required dependency and is installed automatically. Results are also logged to `/var/log/` by default (change it with `-ld`, or turn it off with `-nl`) for future keeping.
@@ -43,7 +43,7 @@ Default mode is **write** (`w`) when no mode is specified.
 - `-ld, --log_directory`: Directory for the log files (default: `/var/log/`).  
 - `-q, --quiet`: Kept for compatibility: quiet is the default.  
 - `-v, --verbose`: Prints per-file output.  
-- `-S, --stealth`: Suppresses the console output and the verbose log file. It implies `-nr`, so no CSV, report or timeline files are written. Worker progress digits still go to stdout unless `-j -` sends the JSON there (the digits then go to stderr).  
+- `-S, --stealth`: Suppresses the console output and the verbose log file. It implies `-nr`, so no CSV or report files are written (`-tl` still writes the timeline). Worker progress digits still go to stdout unless `-j -` sends the JSON there (the digits then go to stderr).  
 - `-z, --zeros`: Uses zero-filled data instead of random.  
 - `-u, --unique_files`: Stamps every 512-byte block with (file, block, worker) so no two blocks of the run are identical, even with `-z`. By default each worker writes the same buffer to all its files, which storage with deduplication (ZFS `dedup=on`, NetApp, Pure, VAST, ...) can store once and report as optimistic. iotest warns when a target directory is on ZFS with dedup enabled or on NFS/SMB. Stamping adds a few ms per 30 MiB file to sync times.  
 - `--verify`: Makes every test file self-checking, for storage acceptance tests. Each file ends with 4 bytes holding the CRC-32 (little-endian, as `zlib.crc32` computes it) of all the bytes before them, and every read (`read`, `random`, `comprehensive` and the `simultaneous` readers) checks it, in this run or any later one, without iotest storing anything. A mismatch fails that read with `verify failed: <path>: CRC-32 mismatch (stored 0x…, computed 0x…)`, so it counts in the failed ops and iotest exits 1. This detects bit flips and torn or misplaced writes (a write that only partly reached the media, or data that landed in another file or at another offset): `--verify` implies `-u`, so no two blocks are the same and a block in the wrong place changes the CRC. A file is checked only against itself, so a whole write that was lost while an older, intact file of the same name stayed is not detected. Files written without `--verify` have no CRC and fail the check: write them with `--verify` too before reading them with it. Needs a file size of at least 8 bytes (exit 2 otherwise). CPU cost: one CRC-32 pass over every byte written and read (about 8 GiB/s per core with zlib 1.3; it depends on the zlib build and the CPU). Without `-bs` it runs outside the op time, before each timed write and after each timed read, so only the sync figures include it; with `-bs` it runs block by block inside the timed op, like `-u` stamping.  
@@ -53,6 +53,7 @@ Default mode is **write** (`w`) when no mode is specified.
 - `--threshold_to_report_anomaly`: Adds a warning to the report when a mode's 99th-percentile latency is more than this many times its 1st-percentile latency (default: 0, off).  
 - `-bt, --benchmark_time`: Seconds to spend benchmarking test data generation speed before the run (default: 5).  
 - `-nr, --no_report`: Disables result report creation.  
+- `-tl, --timeline`: Also writes the [per-operation timeline](#per-operation-timeline), `<name>_ops.csv`. Off by default; with `-tl` it is written even with `-nr` or `-S`. Costs memory per operation (see the timeline section).  
 - `-j, --json PATH`: Writes a JSON summary of the run to `PATH` after the text report, also with `-nr`. `-` prints it to stdout instead; with `-S`, stdout then carries only the JSON (worker progress digits go to stderr). With throughput tuning it describes the final run. A summary that cannot be written exits 1, like other result files.  
 
 ### Modes
@@ -84,10 +85,12 @@ iotest -fs 50m -fc 20 -pc 8 -d /tmp/iotest simultaneous
 - Late starts: workers wait for a common start time. If some reach it late (for example, a slow start under heavy load), the report adds a line such as `Late starts:  3 of 36 workers, up to 0.0412 s late (sync figures include the delay)` and a warning is logged, even without `-v`. The returned result also carries them as `late_starts`.
 
 ### Per-operation timeline
-Besides the per-mode CSV, every run that writes result files also writes `<name>_ops.csv`, one row per attempted operation, so you can see SSD cache exhaustion, throttling or stalls over time. Columns: `pass` (1-based index of the pass in this run; a simultaneous run is one pass), `mode` (the pass's mode; the three passes of a `meta` run all say `meta`), `op` (`write`, `read`, `move`, `stat`, `index`, `create` or `unlink`), `worker` (the worker's counter name, as used for its directory), `file_index` (1-based), `start_s` (seconds from the pass's common start time to the operation's start, 6 decimals; for a failed operation, when the attempt began), `duration_s` (6 decimals, empty for a failed operation) and `error` (empty on success, the error text on failure). Rows are sorted by pass, then `start_s`. Workers that died before reporting have no rows. `-nr` skips this file too.
+With `-tl/--timeline`, iotest also writes `<name>_ops.csv` (next to the other result files, in the first `-d` directory), one row per attempted operation, so you can see SSD cache exhaustion, throttling or stalls over time. It is off by default, and `-tl` writes it even with `-nr` or `-S`. Columns: `pass` (1-based index of the pass in this run; a simultaneous run is one pass), `mode` (the pass's mode; the three passes of a `meta` run all say `meta`), `op` (`write`, `read`, `move`, `stat`, `index`, `create` or `unlink`), `worker` (the worker's counter name, as used for its directory), `file_index` (1-based), `start_s` (seconds from the pass's common start time to the operation's start, 6 decimals; for a failed operation, when the attempt began), `duration_s` (6 decimals, empty for a failed operation) and `error` (empty on success, the error text on failure). Rows are sorted by pass, then `start_s`. Workers that died before reporting have no rows. Throughput tuning attempts do not record it; the final tuning run does.
+
+Recording it does no I/O and next to no work in the timed passes: each worker appends every operation to compact arrays (21 bytes an operation) and hands them over once, after its last operation. iotest keeps them until the run ends and writes the file after the report; with the transfers in between, that takes up to about 160 bytes of memory per operation, on top of the about 200 every run needs for its results, and the memory check counts both. For example, `-pc 64 -fc 100000 meta` (19.2 million operations) is estimated at about 3 GB more with `-tl`.
 
 ### JSON summary
-`--json` is meant for collecting runs from many hosts (for example launched with `mssh`). Top level: `tool`, `version`, `host`, `started` (local time with UTC offset), `options` (`file_size`, `file_count`, `process_count` as requested, `directories`, `modes`, `zeros`, `unique` (also `true` with `--verify`), `start_at`, `block_size` as requested or `null`, `verify`), `start_late_s` (seconds the synchronized first pass started after `--start_at`, `0.0` when on time, `null` without `--start_at`), `results`, `failed_ops` and `report_errors`. `results` has one entry per result key (`write`, `read`, `random_write`, ...), each with `ops`, `failed`, `first_error`, `process_count` (the count that ran, which the memory check can lower), `total_bytes`, `bytes_per_s_call`, `bytes_per_s_sync`, `io_time_pct`, `iops_call`, `iops_sync`, `latency_s` (`avg`, `median`, `p1`, `p99`, `p99_9`, `max`, in seconds; `null` when no op succeeded), `sync_estimated`, `late_workers` and `max_late_s`. Values that do not apply (bytes for `index`, for example) are `null`.
+`--json` is meant for collecting runs from many hosts (for example launched with `mssh`). Top level: `tool`, `version`, `host`, `started` (local time with UTC offset), `options` (`file_size`, `file_count`, `process_count` as requested, `directories`, `modes`, `zeros`, `unique` (also `true` with `--verify`), `start_at`, `block_size` as requested or `null`, `verify`, `timeline`), `start_late_s` (seconds the synchronized first pass started after `--start_at`, `0.0` when on time, `null` without `--start_at`), `results`, `failed_ops` and `report_errors`. `results` has one entry per result key (`write`, `read`, `random_write`, ...), each with `ops`, `failed`, `first_error`, `process_count` (the count that ran, which the memory check can lower), `total_bytes`, `bytes_per_s_call`, `bytes_per_s_sync`, `io_time_pct`, `iops_call`, `iops_sync`, `latency_s` (`avg`, `median`, `p1`, `p99`, `p99_9`, `max`, in seconds; `null` when no op succeeded), `sync_estimated`, `late_workers` and `max_late_s`. Values that do not apply (bytes for `index`, for example) are `null`.
 
 ### Multi-host runs
 `--start_at EPOCH` makes every host begin its first timed pass at the same wall-clock instant (seconds since the Unix epoch, e.g. `$(date -d '+1 min' +%s)`), so the storage sees the combined load. Compute the time once, locally, and pass it to every host:
@@ -112,7 +115,7 @@ Check the available arguments with `-h` or `--help` for more details.
 ```bash
 $ iotest -h
 usage: iotest [-h] [-fs FILE_SIZE] [-bs BLOCK_SIZE] [-fc FILE_COUNT] [-t PROCESS_COUNT] [-ts TOTAL_SIZE]
-              [-d DIRECTORY] [-ld LOG_DIRECTORY] [-q] [-v] [-S] [-nl] [-nr] [-z] [-u] [--verify] [-j PATH] [-cl]
+              [-d DIRECTORY] [-ld LOG_DIRECTORY] [-q] [-v] [-S] [-nl] [-nr] [-tl] [-z] [-u] [--verify] [-j PATH] [-cl]
               [-addr MESSAGE_END_POINT_ADDRESS] [--threshold_to_report_anomaly THRESHOLD_TO_REPORT_ANOMALY]
               [-bt BENCHMARK_TIME] [-wtpt WRITE_TARGET_THROUGHPUT] [-rtpt READ_TARGET_THROUGHPUT] [--start_at EPOCH]
               [-V]
@@ -154,6 +157,8 @@ options:
   -S, --stealth         Suppress verbose output and verbose log file
   -nl, --no_log         Do not write log files
   -nr, --no_report      Do not write report files
+  -tl, --timeline       Also write <report name>_ops.csv, the start time, duration and error of every operation, even
+                        with -nr or -S. Costs up to about 160 bytes of memory per operation
   -z, --zeros           Use zeros instead of random numbers. Use this if you are sure no write compression is
                         available. Potentially higher write accuracy.
   -u, --unique_files    Stamp every 512-byte block with (file, block, worker) so no two blocks of the run are

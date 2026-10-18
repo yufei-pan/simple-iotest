@@ -124,23 +124,29 @@ def test_read_recreates_files(iotest_mod, work_dir, run_main, modes, prepared, e
     assert iotest_mod.read_recreates_files(modes, [str(work_dir)], 2, 2, 1024) == expected
 
 
-@pytest.mark.parametrize("prepared,expected_pc", [(True, 4), (False, 2)])
-def test_memory_guard_counts_read_buffers(run_main, iotest_mod, monkeypatch, prepared, expected_pc):
-    # 6000 B available. With every file present, read workers hold only a read buffer:
-    # 4 x 1024 B x 1.2 = 4915 B fits. On a fresh directory they also need content to
-    # recreate the files (9830 B), so only 6000 // (1024 x 2 x 1.2) = 2 fit
+@pytest.mark.parametrize("prepared", [True, False])
+def test_memory_guard_counts_read_buffers(run_main, iotest_mod, monkeypatch, prepared):
+    # just enough for 4 read workers that hold only a read buffer (every file is present); on a
+    # fresh directory they also need content to recreate the files, so fewer fit
+    read_only = iotest_mod.memory_per_process(["read"], 1024, 1)
+    recreating = iotest_mod.memory_per_process(["read"], 1024, 1, read_recreates=True)
+    available = int(4 * read_only) + 1
+    expected_pc = 4 if prepared else int(available // recreating)
+    assert expected_pc < 4 or prepared
     if prepared:
         run_main(["write"], process_count=4)
-    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (6000, 0))
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (available, 0))
     result = run_main(["read"], process_count=4)
     assert result["process_count"] == expected_pc
 
 
 def test_memory_cut_keeps_at_least_one_simultaneous_reader(run_main, iotest_mod, monkeypatch):
-    # every simultaneous worker holds one buffer: 3000 // (1024 x 1.2) = 2 processes fit,
-    # fewer than the 3 writers asked for; the split must shrink to 1 + 1, not fail with 0 readers
+    # memory for 2.5 simultaneous workers: 2 processes fit, fewer than the 3 writers asked for;
+    # the split must shrink to 1 + 1, not fail with 0 readers
+    available = int(2.5 * iotest_mod.memory_per_process(["simultaneous"], 1024, 1))
     monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
-    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (3000, 0))
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (available, 0))
     result = run_main(["simultaneous"], process_count=4, simultaneous_write_count=3)
     assert result["process_count"] == 2
     assert result["mode_process_counts"] == {"write": 1, "read": 1}
@@ -204,11 +210,65 @@ def test_read_worker_that_will_recreate_generates_before_the_start_barrier(iotes
 
 
 def test_memory_cut_that_changes_padding_recounts_recreated_files(run_main, iotest_mod, monkeypatch):
-    # a -pc 12 write leaves 00..11. 11100 B fits 9 read-only workers (1 x 1024 x 1.2 each), but
-    # at -pc 9 the padding is 0..8, those files are missing, and each worker would also hold
-    # content to recreate them: 11100 // (1024 x 2 x 1.2) = 4
+    # a -pc 12 write leaves 00..11. The memory fits 9 read-only workers, but at -pc 9 the padding
+    # is 0..8, those files are missing, and each worker would also hold content to recreate them
+    read_only = iotest_mod.memory_per_process(["read"], 1024, 1)
+    recreating = iotest_mod.memory_per_process(["read"], 1024, 1, read_recreates=True)
+    available = int(9 * read_only) + 1
+    assert int(available // recreating) < 9
     run_main(["write"], process_count=12)
     monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
-    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (11100, 0))
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (available, 0))
     result = run_main(["read"], process_count=12)
-    assert result["process_count"] == 4
+    assert result["process_count"] == int(available // recreating)
+
+
+@pytest.mark.parametrize(
+    "modes,ops_per_file",
+    [
+        (["write"], 1),
+        (["read"], 1),
+        (["random"], 1),
+        (["index"], 1),
+        (["comprehensive"], 4),
+        # three passes of one op
+        (["meta"], 3),
+        # each simultaneous worker, writer or reader, does one op per file
+        (["simultaneous"], 1),
+        (["benchmark"], 0),
+        (["write", "read", "index"], 3),
+    ],
+)
+def test_ops_per_process_sums_the_passes(iotest_mod, modes, ops_per_file):
+    assert iotest_mod.ops_per_process(modes, 7) == 7 * ops_per_file
+
+
+def test_memory_per_process_grows_with_file_count_and_timeline(iotest_mod):
+    per_process = iotest_mod.memory_per_process
+    result, timeline = iotest_mod.RESULT_BYTES_PER_OP, iotest_mod.TIMELINE_BYTES_PER_OP
+    assert result > 0 and timeline > 0
+    # the data buffers, as before
+    buffers = per_process(["write"], 1024, 0)
+    assert buffers == pytest.approx(1024 * 1.2)
+    assert per_process(["comprehensive"], 1024, 0) == pytest.approx(2 * 1024 * 1.2)
+    # plus every op the process performs over the run
+    assert per_process(["write"], 1024, 1000) == pytest.approx(buffers + 1000 * result)
+    assert per_process(["write", "read"], 1024, 1000) == pytest.approx(buffers + 2000 * result)
+    assert per_process(["write"], 1024, 1000, timeline=True) == pytest.approx(buffers + 1000 * (result + timeline))
+    assert per_process(["comprehensive"], 1024, 1000, timeline=True) == pytest.approx(
+        2 * 1024 * 1.2 + 4000 * (result + timeline))
+    # meta holds no data, but no longer estimates zero
+    assert per_process(["meta"], 1024, 1000) == pytest.approx(3000 * result)
+    assert per_process(["meta"], 1024, 1000, timeline=True) == pytest.approx(3000 * (result + timeline))
+
+
+@pytest.mark.parametrize("timeline", [False, True])
+def test_memory_guard_counts_the_ops_of_a_meta_run(run_main, iotest_mod, monkeypatch, rec_tl, timeline):
+    # room for 2.5 processes' results (and timeline): 2 of the 4 run
+    per_process = iotest_mod.memory_per_process(["meta"], 1024, 100, timeline=timeline)
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (int(2.5 * per_process), 0))
+    result = run_main(["meta"], process_count=4, file_count=100, tl=rec_tl, timeline=timeline)
+    assert result["process_count"] == 2
+    assert f"Estimated total memory usage: {iotest_mod.format_bytes(4 * per_process)}B" in rec_tl.printed
+    assert "Reducing the number of processes to 2" in rec_tl.printed

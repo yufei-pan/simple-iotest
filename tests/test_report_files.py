@@ -39,7 +39,7 @@ def test_long_directories_still_write_result_files(run_main, rec_tl, tmp_path):
         d.mkdir()
         dirs.append(str(d))
     assert len("_".join(dirs).encode()) > 255
-    result = run_main(["write"], directory=dirs, process_count=2, tl=rec_tl, no_report=False)
+    result = run_main(["write"], directory=dirs, process_count=2, tl=rec_tl, no_report=False, timeline=True)
     assert result["report_errors"] == []
     names = sorted(p.name for p in Path(dirs[0]).glob("iotest_*"))
     assert len(names) == 3

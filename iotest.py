@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
+import array
 import csv
 import datetime
 import functools
 import hashlib
+import heapq
 import itertools
 import json
 import math
@@ -641,15 +643,41 @@ def int_to_color(n, brightness_threshold=500):
 		return int_to_color(hash_value, brightness_threshold)
 	return (r, g, b)
 
-def record_op(local_timeline, op, counter, file_index, base, attempt_start, result):
-	# rows are seconds from the pass's start barrier; a failed op has no start of its own, so it gets when the attempt began
-	if local_timeline is None:
-		return
-	start, end = result[0], result[1]
-	if start is None:
-		local_timeline.append((op, counter, file_index, attempt_start - base, None, end))
-	else:
-		local_timeline.append((op, counter, file_index, start - base, end - start, ''))
+# the timeline's op column; workers store an op as its index here, in one byte
+TIMELINE_OPS = ('write', 'read', 'move', 'stat', 'index', 'create', 'unlink')
+TIMELINE_OP_CODES = {op: code for code, op in enumerate(TIMELINE_OPS)}
+
+class OpTimeline:
+	# one worker's ops of one pass in typed arrays (21 bytes an op), handed to the parent as one record
+	def __init__(self, counter, base, file_count):
+		self.counter = counter
+		self.base = base
+		self.ops = array.array('B')
+		self.file_indexes = array.array('I' if file_count <= 0xFFFFFFFF else 'Q')
+		self.starts = array.array('d')
+		self.durations = array.array('d')
+		# position -> error text of the failed ops, whose duration is NaN
+		self.errors = {}
+
+	def add(self, op, file_index, attempt_start, result):
+		# seconds from the pass's start barrier; a failed op has no start of its own, so it gets when the attempt began
+		start, end = result[0], result[1]
+		if start is None:
+			self.errors[len(self.starts)] = end
+			self.starts.append(attempt_start - self.base)
+			self.durations.append(math.nan)
+		else:
+			self.starts.append(start - self.base)
+			self.durations.append(end - start)
+		self.ops.append(TIMELINE_OP_CODES[op])
+		self.file_indexes.append(file_index)
+
+	def record(self):
+		# plain bytes, which the manager can hold whatever the start method. Pickle copies an array's data
+		# to bytes and keeps that copy until the whole transfer ends, so as bytes a pass's records take one
+		# copy less in the manager and in the parent
+		return (self.counter, self.file_indexes.typecode, self.ops.tobytes(), self.file_indexes.tobytes(),
+			self.starts.tobytes(), self.durations.tobytes(), self.errors)
 
 def worker_color_log(color, msg, quiet=False):
 	# each worker prints in its own color, so interleaved lines stay apart
@@ -658,7 +686,8 @@ def worker_color_log(color, msg, quiet=False):
 
 def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False, late_starts=None, progress_to_stderr=False, timeline=None, block_size=None, verify=False):
 	local_results = []
-	local_timeline = [] if timeline is not None else None
+	# only with --timeline; without it the loop below does no timeline work beyond a None check
+	local_timeline = OpTimeline(counter, thread_start_time, file_count) if timeline is not None else None
 	log = functools.partial(worker_color_log, int_to_color(os.getpid()), quiet=quiet)
 	log(f'Worker {counter} scheduled to start at {thread_start_time-time.perf_counter():.4f} later in {mode} mode.')
 	# read workers create content only if a file must be recreated; index never needs any
@@ -694,16 +723,18 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		write_file = functools.partial(content.write, index=i, quiet=quiet)
 		file_index = i + 1
 		i = str(file_index).zfill(len(str(file_count)))
-		attempt = time.perf_counter()
+		attempt = time.perf_counter() if local_timeline is not None else None
 		if mode == 'write':
 			op_result = write_file(file_name)
-			record_op(local_timeline, 'write', counter, file_index, thread_start_time, attempt, op_result)
+			if local_timeline is not None:
+				local_timeline.add('write', file_index, attempt, op_result)
 			write_time = op_time(op_result)
 			local_results.append(write_time)
 			log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\t{format_op(write_time)}")
 		elif mode == 'read':
 			op_result = read_file(file_name, None, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
-			record_op(local_timeline, 'read', counter, file_index, thread_start_time, attempt, op_result)
+			if local_timeline is not None:
+				local_timeline.add('read', file_index, attempt, op_result)
 			read_time = op_time(op_result)
 			local_results.append(read_time)
 			log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\t{format_op(read_time)}")
@@ -711,13 +742,15 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 			# here we start a random read or write
 			if bool(random.getrandbits(1)):
 				op_result = write_file(file_name)
-				record_op(local_timeline, 'write', counter, file_index, thread_start_time, attempt, op_result)
+				if local_timeline is not None:
+					local_timeline.add('write', file_index, attempt, op_result)
 				write_time = op_time(op_result)
 				local_results.append(('write', write_time))
 				log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\t{format_op(write_time)}")
 			else:
 				op_result = read_file(file_name, None, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
-				record_op(local_timeline, 'read', counter, file_index, thread_start_time, attempt, op_result)
+				if local_timeline is not None:
+					local_timeline.add('read', file_index, attempt, op_result)
 				read_time = op_time(op_result)
 				local_results.append(('read', read_time))
 				log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\t{format_op(read_time)}")
@@ -725,22 +758,26 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 			resultList = []
 			moved_name = file_name + ".moved"
 			op_result = write_file(file_name)
-			record_op(local_timeline, 'write', counter, file_index, thread_start_time, attempt, op_result)
+			if local_timeline is not None:
+				local_timeline.add('write', file_index, attempt, op_result)
 			resultList.append(op_time(op_result))
-			attempt = time.perf_counter()
+			attempt = time.perf_counter() if local_timeline is not None else None
 			op_result = move_file(file_name, moved_name, quiet=quiet)
-			record_op(local_timeline, 'move', counter, file_index, thread_start_time, attempt, op_result)
+			if local_timeline is not None:
+				local_timeline.add('move', file_index, attempt, op_result)
 			resultList.append(op_time(op_result))
-			attempt = time.perf_counter()
+			attempt = time.perf_counter() if local_timeline is not None else None
 			stat_result = stat_file(moved_name, quiet=quiet)
-			record_op(local_timeline, 'stat', counter, file_index, thread_start_time, attempt, stat_result)
+			if local_timeline is not None:
+				local_timeline.add('stat', file_index, attempt, stat_result)
 			size = stat_result[2]
 			if size != file_size:
 				worker_log(f'{bcolors.critical}File {file_name} size is wrong, expected {file_size}, got {size}\033[0m', level='error', quiet=quiet)
 			resultList.append(op_time(stat_result))
-			attempt = time.perf_counter()
+			attempt = time.perf_counter() if local_timeline is not None else None
 			op_result = read_file(moved_name, None, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
-			record_op(local_timeline, 'read', counter, file_index, thread_start_time, attempt, op_result)
+			if local_timeline is not None:
+				local_timeline.add('read', file_index, attempt, op_result)
 			resultList.append(op_time(op_result))
 			try:
 				os.remove(moved_name)
@@ -751,14 +788,16 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		elif mode == 'index':
 			# This will test the indexing performance of the filesystem
 			op_result = index_file(file_name, quiet)
-			record_op(local_timeline, 'index', counter, file_index, thread_start_time, attempt, op_result)
+			if local_timeline is not None:
+				local_timeline.add('index', file_index, attempt, op_result)
 			index_time = op_time(op_result)
 			local_results.append(index_time)
 			log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tIndexed\t{format_op(index_time)}")
 		elif is_meta:
 			phase = mode[len('meta_'):]
 			op_result = meta_file(phase, file_name, quiet)
-			record_op(local_timeline, phase, counter, file_index, thread_start_time, attempt, op_result)
+			if local_timeline is not None:
+				local_timeline.add(phase, file_index, attempt, op_result)
 			meta_time = op_time(op_result)
 			local_results.append(meta_time)
 			log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\t{phase.capitalize()}\t{format_op(meta_time)}")
@@ -766,8 +805,9 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		remove_meta_dir(meta_dir)
 	log(f'Worker {counter} finished.')
 	results.extend(local_results)
-	if timeline is not None:
-		timeline.extend(local_timeline)
+	if local_timeline is not None:
+		# one record per worker and pass, so the manager sees one append, not one per op
+		timeline.append(local_timeline.record())
 
 def worker_counter_name(counter, process_count):
 	return str(counter).zfill(len(str(process_count)))
@@ -942,7 +982,7 @@ def layout_read_worker(file_count, file_size, base_directory, run_id, counter, q
 
 def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id, counter, results, quiet, zeros, thread_start_time, unique=False, late_starts=None, timeline=None, block_size=None, verify=False):
 	local_results = []
-	local_timeline = [] if timeline is not None else None
+	local_timeline = OpTimeline(counter, thread_start_time, file_count) if timeline is not None else None
 	log = functools.partial(worker_color_log, int_to_color(os.getpid()), quiet=quiet)
 	log(f'Worker {counter} ({role}) scheduled to start at {thread_start_time-time.perf_counter():.4f} later.')
 	# readers read the layout's files and create content only if one must be recreated
@@ -961,23 +1001,26 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 		i_str = str(i + 1).zfill(len(str(file_count)))
 		file_name = os.path.join(worker_dir, f"{file_prefix}{i_str}.bin")
 		write_file = functools.partial(content.write, index=i, quiet=quiet)
-		attempt = time.perf_counter()
+		attempt = time.perf_counter() if local_timeline is not None else None
 		if role == 'write':
 			op_result = write_file(file_name)
-			record_op(local_timeline, 'write', counter, i + 1, thread_start_time, attempt, op_result)
+			if local_timeline is not None:
+				local_timeline.add('write', i + 1, attempt, op_result)
 			op = op_time(op_result)
 			local_results.append(op)
 			log(f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tWrote\t{format_op(op)}")
 		else:
 			op_result = read_file(file_name, None, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
-			record_op(local_timeline, 'read', counter, i + 1, thread_start_time, attempt, op_result)
+			if local_timeline is not None:
+				local_timeline.add('read', i + 1, attempt, op_result)
 			op = op_time(op_result)
 			local_results.append(op)
 			log(f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tRead\t{format_op(op)}")
 	log(f'Worker {counter} ({role}) finished.')
 	results.extend(local_results)
-	if timeline is not None:
-		timeline.extend(local_timeline)
+	if local_timeline is not None:
+		# one record per worker and pass, so the manager sees one append, not one per op
+		timeline.append(local_timeline.record())
 
 def cleanup_simultaneous_tree(directories, run_id, process_count):
 	seen = set()
@@ -1016,7 +1059,7 @@ class RunOptions:
 	def __init__(self, *, file_size, file_count, process_count, modes, directories=None,
 			quiet=True, zeros=False, stealth=False, message_end_point_address=None, no_report=False,
 			threshold_to_report_anomaly=0, benchmark_time=5, unique=False, cleanup=False, json_path=None, start_at=None,
-			block_size=None, verify=False):
+			block_size=None, verify=False, timeline=False):
 		self.file_size = file_size
 		self.file_count = file_count
 		self.process_count = process_count
@@ -1038,6 +1081,8 @@ class RunOptions:
 		self.start_at = start_at
 		# as requested; run_iotest() treats one at least the file size as unset
 		self.block_size = block_size
+		# write <base>_ops.csv, also with no_report
+		self.timeline = timeline
 
 	def replace(self, **changes):
 		values = dict(vars(self))
@@ -1211,6 +1256,26 @@ def memory_copies(modes, read_recreates=False):
 		return 2
 	return 1
 
+# memory per op performed, in the parent and the manager process together. Every run keeps each op's
+# result until it ends (the manager holds a pass's while it runs); --timeline adds the op's record, 21 bytes
+# in arrays plus the copies made handing a pass over. Measured as the slope of their peak RSS (VmHWM) from
+# -fc 25000 to 50000 at -pc 8 with 1 KiB files, in every mode (Python 3.13, Linux, 2-3 runs each): results
+# took 55 (meta) to 167 (comprehensive) bytes an op, the timeline 49 (meta) to 127 (write) more. These are
+# the largest plus about 20 %
+RESULT_BYTES_PER_OP = 200
+TIMELINE_BYTES_PER_OP = 160
+
+# ops each process performs per file in each mode (meta is three passes of one op)
+OPS_PER_FILE = {'write': 1, 'read': 1, 'random': 1, 'index': 1, 'comprehensive': 4, 'meta': 3, 'simultaneous': 1}
+
+def ops_per_process(modes, file_count):
+	return file_count * sum(OPS_PER_FILE.get(mode, 0) for mode in modes)
+
+def memory_per_process(modes, buffer_size, file_count, read_recreates=False, timeline=False):
+	# a worker's data buffers, plus what the parent and the manager keep for every op it performs over the run
+	per_op = RESULT_BYTES_PER_OP + (TIMELINE_BYTES_PER_OP if timeline else 0)
+	return buffer_size * memory_copies(modes, read_recreates) * 1.2 + ops_per_process(modes, file_count) * per_op
+
 def read_meminfo():
 	# (MemAvailable, SwapFree) in bytes, -1 when unknown
 	phyFreeMemory = -1
@@ -1302,19 +1367,34 @@ def report_base_name(modes, directories, file_size, file_count, process_count, c
 		dir_str_repr = kept + marker
 	return head + dir_str_repr + tail
 
-def collect_timeline(timeline_rows, pass_timeline, pass_index, mode):
-	if timeline_rows is not None:
-		# one bulk fetch per pass; row-by-row iteration of the proxy costs a round trip per row
-		timeline_rows.append((pass_index, mode, pass_timeline[:]))
+def collect_timeline(timeline_passes, pass_timeline, pass_index, mode):
+	if timeline_passes is not None:
+		# one bulk fetch of the pass's records (one per worker), then empty the manager's list so the
+		# manager process does not hold them too
+		timeline_passes.append((pass_index, mode, pass_timeline[:]))
+		del pass_timeline[:]
 
-def write_timeline(timeline_rows):
+def timeline_ops(record):
+	# one worker's ops of one pass, in the order it ran them, so by start: (start, op, worker, file_index, duration, error)
+	counter, index_type, ops, file_indexes, starts, durations, errors = record
+	file_indexes = memoryview(file_indexes).cast(index_type)
+	starts = memoryview(starts).cast('d')
+	durations = memoryview(durations).cast('d')
+	for position, start in enumerate(starts):
+		failed = position in errors
+		yield (start, TIMELINE_OPS[ops[position]], counter, file_indexes[position],
+			None if failed else durations[position], errors[position] if failed else '')
+
+def write_timeline(timeline_passes):
 	def write(f):
 		writer = csv.writer(f)
 		writer.writerow(['pass', 'mode', 'op', 'worker', 'file_index', 'start_s', 'duration_s', 'error'])
-		# passes are already in order; within one, a stable sort by start (workers append in their own order)
-		for pass_index, mode, rows in timeline_rows:
-			for row in sorted(rows, key=lambda r: r[3]):
-				writer.writerow([pass_index, mode, row[0], row[1], row[2], '%.6f' % row[3], '' if row[4] is None else '%.6f' % row[4], row[5]])
+		# passes are already in order. Within one, each worker's ops are in start order, so a lazy merge
+		# orders them with one pending row per worker; equal starts keep the order the records arrived in
+		for pass_index, mode, records in timeline_passes:
+			for start, op, counter, file_index, duration, error in heapq.merge(*map(timeline_ops, records), key=lambda row: row[0]):
+				writer.writerow([pass_index, mode, op, counter, file_index, '%.6f' % start,
+					'' if duration is None else '%.6f' % duration, error])
 	return write
 
 def write_report_file(path, write_content, tl, report_errors, newline=None):
@@ -1412,7 +1492,7 @@ def build_json_summary(options, started, key_stats, late_starts, sync_estimated,
 			'modes': options.modes, 'zeros': options.zeros, 'unique': options.unique,
 			'start_at': options.start_at,
 			'block_size': None if options.block_size is None else int(options.block_size),
-			'verify': options.verify},
+			'verify': options.verify, 'timeline': options.timeline},
 		# how long the synchronized first pass started after --start_at; null without it
 		'start_late_s': None if options.start_at is None else (start_late[0] if start_late else 0.0),
 		'results': results,
@@ -1444,14 +1524,14 @@ def first_pass_start(start_at, process_start_delay, tl, start_notes, start_late)
 	tl.teelog(f"Warning | iotest: --start_at is too soon; the first pass starts {late_by:.1f} s late", level='warning')
 	return now + process_start_delay
 
-def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None,unique=False,cleanup=False,json_path=None,start_at=None,block_size=None,verify=False):
+def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None,unique=False,cleanup=False,json_path=None,start_at=None,block_size=None,verify=False,timeline=False):
 	# the original entry point, kept for callers that pass options one by one
 	options = RunOptions(file_size=file_size, file_count=file_count, process_count=process_count,
 		modes=modes, directories=directory, quiet=quiet, zeros=zeros, stealth=stealth,
 		message_end_point_address=message_end_point_address, no_report=no_report,
 		threshold_to_report_anomaly=threshold_to_report_anomaly, benchmark_time=benchmarkTime,
 		unique=unique, cleanup=cleanup, json_path=json_path, start_at=start_at, block_size=block_size,
-		verify=verify)
+		verify=verify, timeline=timeline)
 	return run_iotest(options, tl=tl, tuning_attempt=tuning_attempt,
 		simultaneous_write_count=simultaneous_write_count, simultaneous_run_id=simultaneous_run_id,
 		simultaneous_skip_layout=simultaneous_skip_layout, simultaneous_skip_cleanup=simultaneous_skip_cleanup,
@@ -1464,8 +1544,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	# read before the tuning override below: attempts must keep the digits off the JSON's stdout too
 	json_to_stdout = options.json_path == '-'
 	if tuning_attempt:
-		# an attempt only feeds the tuner: no report files, no short reports
-		options = options.replace(no_report=True, message_end_point_address=None, json_path=None)
+		# an attempt only feeds the tuner: no report files, no short reports, no timeline
+		options = options.replace(no_report=True, message_end_point_address=None, json_path=None, timeline=False)
 	if options.stealth:
 		options = options.replace(quiet=True, no_report=True)
 	# locals: the checks below may lower process_count or zero file_count, and the caller's
@@ -1507,7 +1587,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	totalTime = {}
 	mode_process_counts = {}
 	read_recreates = read_recreates_files(modes, directories, process_count, file_count, file_size)
-	memoryPerProcess = buffer_size * memory_copies(modes, read_recreates) * 1.2
+	memoryPerProcess = memory_per_process(modes, buffer_size, file_count, read_recreates, options.timeline)
 	estimatedTotalMemory = memoryPerProcess * process_count
 	if modes == ['benchmark']:
 		file_count = 0
@@ -1527,7 +1607,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		# expects may now be missing, and recreating them needs a second buffer per worker
 		if not read_recreates and read_recreates_files(modes, directories, process_count, file_count, file_size):
 			read_recreates = True
-			memoryPerProcess = buffer_size * memory_copies(modes, read_recreates) * 1.2
+			memoryPerProcess = memory_per_process(modes, buffer_size, file_count, read_recreates, options.timeline)
 			process_count = max(int((phyFreeMemory + swapMemory) // memoryPerProcess), 1)
 		tl.teeerror(f"Reducing the number of processes to {process_count}")
 	if 'simultaneous' in modes and simultaneous_write_count is not None and simultaneous_write_count > process_count - 1 >= 1:
@@ -1557,8 +1637,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	with Manager() as manager:
 		# bench mark file generation performance first
 		results = manager.list()
-		# workers collect rows only when the timeline file will be written
-		timeline_rows = [] if not options.no_report else None
+		# workers record a timeline only with --timeline
+		timeline_passes = [] if options.timeline else None
 		pass_index = 0
 		is_simultaneous = 'simultaneous' in modes
 		if is_simultaneous:
@@ -1651,7 +1731,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					read_results = manager.list()
 					write_late = manager.list()
 					read_late = manager.list()
-					pass_timeline = manager.list() if timeline_rows is not None else None
+					pass_timeline = manager.list() if timeline_passes is not None else None
 					write_processes = []
 					read_processes = []
 					if sync_start_at is not None:
@@ -1690,7 +1770,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					addToDicWithoutOverwrite(mode_process_counts, 'read', read_count)
 					record_pass_meta(late_starts, sync_estimated, 'write', write_late, False)
 					record_pass_meta(late_starts, sync_estimated, 'read', read_late, False)
-					collect_timeline(timeline_rows, pass_timeline, pass_index, mode)
+					collect_timeline(timeline_passes, pass_timeline, pass_index, mode)
 					warn_late_starts(tl, 'simultaneous', list(write_late) + list(read_late), process_count)
 				finally:
 					if not simultaneous_skip_cleanup:
@@ -1700,7 +1780,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			processes = []
 			results = manager.list()
 			late = manager.list()
-			pass_timeline = manager.list() if timeline_rows is not None else None
+			pass_timeline = manager.list() if timeline_passes is not None else None
 			if sync_start_at is not None:
 				thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes, start_late)
 				sync_start_at = None
@@ -1718,7 +1798,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			totalEndTime =  time.perf_counter() - totalStartTime
 			dead_errors = dead_worker_errors(processes, file_count)
 			processes.clear()
-			collect_timeline(timeline_rows, pass_timeline, pass_index, 'meta' if mode.startswith('meta_') else mode)
+			collect_timeline(timeline_passes, pass_timeline, pass_index, 'meta' if mode.startswith('meta_') else mode)
 			if mode == 'comprehensive':
 				results = list(results) + [[error] * 4 for error in dead_errors]
 				writes = add_op_results(outResults,failedOps,'write',[result[0] for result in results])
@@ -1764,7 +1844,10 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				record_pass_meta(late_starts, sync_estimated, mode, late, False)
 			warn_late_starts(tl, mode, list(late), process_count)
 	report_errors = []
-	if not options.no_report and outResults:
+	writes_reports = not options.no_report and bool(outResults)
+	# an explicit --timeline is written also with -nr (and -S), like --json
+	writes_timeline = timeline_passes is not None and bool(outResults)
+	if writes_reports or writes_timeline:
 		report_base = os.path.join(primary_directory, report_base_name(modes, directories, file_size, file_count, process_count, tl.currentDateTime))
 	report = list(start_notes)
 	short_reports = []
@@ -1797,7 +1880,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	if quiet:
 		print(file=sys.stderr if json_to_stdout else None)
 	tl.teeprint('\n'.join(report))
-	if not options.no_report and outResults:
+	if writes_reports:
 		csv_file_name = report_base + REPORT_SUFFIXES[0]
 		def write_csv(f):
 			# the headers are just the keys in the dic, the values are the list of results
@@ -1810,9 +1893,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		report_file_name = report_base + REPORT_SUFFIXES[1]
 		if write_report_file(report_file_name, lambda f: f.write('\n'.join(report)), tl, report_errors):
 			tl.teeprint(f"Report written to {report_file_name}")
+	if writes_timeline:
 		ops_file_name = report_base + REPORT_SUFFIXES[2]
-		if write_report_file(ops_file_name, write_timeline(timeline_rows), tl, report_errors, newline=''):
+		if write_report_file(ops_file_name, write_timeline(timeline_passes), tl, report_errors, newline=''):
 			tl.teeprint(f"Timeline written to {ops_file_name}")
+	if writes_reports:
 		print(f"Log file: {tl.logFileName}")
 	if options.json_path:
 		write_json_summary(options.json_path, build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors, start_late), tl, report_errors)
@@ -1887,7 +1972,7 @@ def _run_tuning_main(options, tl, process_count, simultaneous_write_count=None, 
 	return result
 
 def _finalize_tuning_run(options, tl, process_count, simultaneous_write_count=None, simultaneous_session=None):
-	if not options.no_report or options.message_end_point_address or options.json_path:
+	if not options.no_report or options.message_end_point_address or options.json_path or options.timeline:
 		kwargs = simultaneous_session or {}
 		result = run_iotest(options.replace(process_count=process_count), tl=tl,
 			simultaneous_write_count=simultaneous_write_count, **kwargs)
@@ -2298,6 +2383,7 @@ def climain():
 	parser.add_argument("-S",'--stealth', action="store_true", help="Suppress verbose output and verbose log file",default=False)
 	parser.add_argument('-nl',"--no_log", action="store_true", help="Do not write log files",default=False)
 	parser.add_argument('-nr',"--no_report", action="store_true", help="Do not write report files",default=False)
+	parser.add_argument('-tl',"--timeline", action="store_true", help="Also write <report name>_ops.csv, the start time, duration and error of every operation, even with -nr or -S. Costs up to about %d bytes of memory per operation" % TIMELINE_BYTES_PER_OP,default=False)
 	parser.add_argument("-z","--zeros", action="store_true", help="Use zeros instead of random numbers. Use this if you are sure no write compression is available. Potentially higher write accuracy.",default=False)
 	parser.add_argument("-u","--unique_files", action="store_true", help="Stamp every 512-byte block with (file, block, worker) so no two blocks of the run are identical. Use on storage that deduplicates (iotest warns when it detects some). Adds a few ms per 30 MiB file to sync times.",default=False)
 	parser.add_argument("--verify", action="store_true", help="End every file with a CRC-32 of its other bytes and check it on every read, in this run or a later one, to detect bit flips and torn or misplaced writes. Implies -u. Needs a file size of at least 8 bytes; files written without --verify fail the check",default=False)
@@ -2382,7 +2468,7 @@ def climain():
 		message_end_point_address=args.message_end_point_address, no_report=args.no_report,
 		threshold_to_report_anomaly=args.threshold_to_report_anomaly, benchmark_time=args.benchmark_time,
 		unique=args.unique_files, cleanup=args.cleanup, json_path=args.json_path, start_at=args.start_at,
-		block_size=args.block_size, verify=args.verify)
+		block_size=args.block_size, verify=args.verify, timeline=args.timeline)
 	# -S keeps the run settings out of the output, in the log only
 	echo = tl.info if args.stealth else tl.teeprint
 	echo(f'Running in {modes} modes...')

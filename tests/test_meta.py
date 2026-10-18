@@ -9,7 +9,7 @@ def test_meta_alias(iotest_mod):
 
 
 def test_meta_run_has_three_keys_iops_and_leaves_nothing(run_main, work_dir, rec_tl):
-    result = run_main(["meta"], process_count=2, file_count=5, tl=rec_tl, no_report=False)
+    result = run_main(["meta"], process_count=2, file_count=5, tl=rec_tl, no_report=False, timeline=True)
     for key in ("meta_create", "meta_stat", "meta_unlink"):
         assert len(result["outResults"][key]) == 10
         assert not result["failedOps"].get(key)
