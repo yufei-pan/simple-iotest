@@ -2,6 +2,7 @@ import json
 import multiprocessing
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -24,22 +25,27 @@ def pytest_configure(config):
 
 @pytest.fixture(autouse=True)
 def start_method_for_patched_workers(request):
-    # iotest starts workers with the platform's default start method: fork on Linux, spawn on macOS and Windows.
-    # Spawned workers import the module afresh, so a test that patches module state for them (a worker
-    # function, random, os.writev, ...) only works with fork: macOS is switched to it for those tests and
-    # Windows, which has no fork, skips them. Every other test, including the plain write/read ones, runs with
-    # the default method, which is what the real command uses.
+    # iotest starts workers with the platform's default start method: fork on Linux before Python 3.14,
+    # forkserver on Linux from 3.14, spawn on macOS and Windows. Workers that are not forked import the module
+    # afresh, so a test that patches module state for them (a worker function, random, os.writev, ...) only
+    # works with fork: it is switched to fork for those tests, and Windows, which has no fork, skips them.
+    # Every other test, including the plain write/read ones, runs with the default method, which is what the
+    # real command uses.
     if request.node.get_closest_marker("patches_workers") is None:
         yield
     elif sys.platform == "win32":
         pytest.skip("Windows has no fork, so patches do not reach the spawned workers")
-    elif sys.platform == "darwin":
+    else:
         previous = multiprocessing.get_start_method(allow_none=True)
         multiprocessing.set_start_method("fork", force=True)
-        yield
-        multiprocessing.set_start_method(previous, force=True)
-    else:
-        yield
+        try:
+            with warnings.catch_warnings():
+                # macOS test processes hold threads; these short-lived workers only run iotest code
+                warnings.filterwarnings("ignore", message=r"This process \(pid=\d+\) is multi-threaded",
+                                        category=DeprecationWarning)
+                yield
+        finally:
+            multiprocessing.set_start_method(previous, force=True)
 
 
 @pytest.fixture

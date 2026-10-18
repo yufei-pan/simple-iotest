@@ -1788,8 +1788,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				short_report = f"Short Report for {mode} mode: {format_iops(stats['iops_call'])} IOPS, avg {latency['avg']:.4f} s, median {latency['median']:.4f} s"
 			short_reports.append(short_report + failed_note)
 	# the text report goes first, so a failing result file cannot lose it
-	# the workers' progress digits end without a newline; with the JSON on stdout they went to stderr
-	tl.teeprint(('\n' if quiet and not json_to_stdout else '') + '\n'.join(report))
+	# the workers' progress digits end without a newline: end their line on the stream they went to,
+	# not inside the report, which the logger may prefix ("[INFO] ") on the digits' line
+	if quiet:
+		print(file=sys.stderr if json_to_stdout else None)
+	tl.teeprint('\n'.join(report))
 	if not options.no_report and outResults:
 		csv_file_name = report_base + REPORT_SUFFIXES[0]
 		def write_csv(f):

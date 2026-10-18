@@ -182,5 +182,7 @@ def test_cli_accepts_fractional_anomaly_threshold(tmp_path):
 def test_quiet_progress_digits_are_not_glued_to_the_report(tmp_path):
     proc = run_iotest(["-d", str(tmp_path), "-nl", "-nr", "-fs", "1k", "-fc", "10", "-t", "1", "-bt", "1", "write"])
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    # the last digit is 9 (ten files), then the color reset and a newline put the report on its own line
-    assert "9\x1b[0m\n**" in proc.stdout
+    # the last digit is 9 (ten files); universal_newlines turns the digits' \r into \n, so the digit line
+    # ends cleanly whatever prefix (color reset, "[INFO] ") the installed tee-logger puts on the report
+    assert "\n9\n" in proc.stdout
+    assert "*" * 80 in proc.stdout

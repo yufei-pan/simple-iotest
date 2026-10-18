@@ -9,8 +9,9 @@ from test_cli import run_iotest
 
 KiB = 2**10
 MiB = 2**20
-REAL_WRITEV = os.writev
-REAL_READV = os.readv
+# Windows has neither; the tests that use them skip there
+REAL_WRITEV = getattr(os, "writev", None)
+REAL_READV = getattr(os, "readv", None)
 
 
 def blocks(data, size=512):
@@ -171,6 +172,7 @@ def test_chunked_io_finishes_short_transfers(iotest_mod, tmp_path, monkeypatch):
     assert sum(consumed) == 2500
 
 
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 @pytest.mark.parametrize("op", ["write", "read"])
 def test_a_stalled_chunk_names_the_bytes_moved_across_blocks(iotest_mod, tmp_path, monkeypatch, op):
     target = tmp_path / "f.bin"
