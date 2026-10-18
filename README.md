@@ -50,6 +50,7 @@ Default mode is **write** (`w`) when no mode is specified.
 - `write` / `w`: Only file writes (default).  
 - `read` / `r`: Only file reads.  
 - `index` / `i`: Create and remove temporary index folders.  
+- `meta` / `m`: Metadata rates, like mdtest. Three passes in order, each with its own start barrier: create, stat, then unlink `-fc` empty files per process (under `<directory>/<counter>/meta/`, as `meta_<i>`). Results are under the keys `meta_create`, `meta_stat` and `meta_unlink`, and the timeline's `mode` is `meta` with `op` `create`, `stat` or `unlink`. They have IOPS and latency but no bandwidth, since no data is moved; `-fs` and `-bs` do not apply and no memory is reserved for file content. Leftover meta files of an interrupted run are removed (untimed) before the create pass, the empty meta directories are removed after the unlink pass, and `-cl` removes any left behind. A file missing in the stat or unlink pass counts as a failed operation.  
 - `random`: Random read/write steps. Reads and writes are reported separately, as `random_write` and `random_read` (and as separate CSV columns); both use the whole pass's wall time for the sync figures.  
 - `comprehensive` / `c`: write → move → stat → read per file. Each section ends with a note that its sync figures are estimates: the pass time is split across write/move/stat/read by their share of op time.  
 - `rw` / `wr`: Run write, then read sequentially in batch mode.  
@@ -73,7 +74,7 @@ iotest -fs 50m -fc 20 -pc 8 -d /tmp/iotest simultaneous
 - Late starts: workers wait for a common start time. If some reach it late (for example, a slow start under heavy load), the report adds a line such as `Late starts:  3 of 36 workers, up to 0.0412 s late (sync figures include the delay)` and a warning is logged, even without `-v`. The returned result also carries them as `late_starts`.
 
 ### Per-operation timeline
-Besides the per-mode CSV, every run that writes result files also writes `<name>_ops.csv`, one row per attempted operation, so you can see SSD cache exhaustion, throttling or stalls over time. Columns: `pass` (1-based index of the pass in this run; a simultaneous run is one pass), `mode` (the pass's mode), `op` (`write`, `read`, `move`, `stat` or `index`), `worker` (the worker's counter name, as used for its directory), `file_index` (1-based), `start_s` (seconds from the pass's common start time to the operation's start, 6 decimals; for a failed operation, when the attempt began), `duration_s` (6 decimals, empty for a failed operation) and `error` (empty on success, the error text on failure). Rows are sorted by pass, then `start_s`. Workers that died before reporting have no rows. `-nr` skips this file too.
+Besides the per-mode CSV, every run that writes result files also writes `<name>_ops.csv`, one row per attempted operation, so you can see SSD cache exhaustion, throttling or stalls over time. Columns: `pass` (1-based index of the pass in this run; a simultaneous run is one pass), `mode` (the pass's mode; the three passes of a `meta` run all say `meta`), `op` (`write`, `read`, `move`, `stat`, `index`, `create` or `unlink`), `worker` (the worker's counter name, as used for its directory), `file_index` (1-based), `start_s` (seconds from the pass's common start time to the operation's start, 6 decimals; for a failed operation, when the attempt began), `duration_s` (6 decimals, empty for a failed operation) and `error` (empty on success, the error text on failure). Rows are sorted by pass, then `start_s`. Workers that died before reporting have no rows. `-nr` skips this file too.
 
 ### JSON summary
 `--json` is meant for collecting runs from many hosts (for example launched with `mssh`). Top level: `tool`, `version`, `host`, `started` (local time with UTC offset), `options` (`file_size`, `file_count`, `process_count` as requested, `directories`, `modes`, `zeros`, `unique` (also `true` with `--verify`), `start_at`, `block_size` as requested or `null`, `verify`), `results`, `failed_ops` and `report_errors`. `results` has one entry per result key (`write`, `read`, `random_write`, ...), each with `ops`, `failed`, `first_error`, `process_count` (the count that ran, which the memory check can lower), `total_bytes`, `bytes_per_s_call`, `bytes_per_s_sync`, `io_time_pct`, `iops_call`, `iops_sync`, `latency_s` (`avg`, `median`, `p1`, `p99`, `p99_9`, `max`, in seconds; `null` when no op succeeded), `sync_estimated`, `late_workers` and `max_late_s`. Values that do not apply (bytes for `index`, for example) are `null`.
@@ -104,17 +105,19 @@ usage: iotest [-h] [-fs FILE_SIZE] [-bs BLOCK_SIZE] [-fc FILE_COUNT] [-t PROCESS
               [-addr MESSAGE_END_POINT_ADDRESS] [--threshold_to_report_anomaly THRESHOLD_TO_REPORT_ANOMALY]
               [-bt BENCHMARK_TIME] [-wtpt WRITE_TARGET_THROUGHPUT] [-rtpt READ_TARGET_THROUGHPUT] [--start_at EPOCH]
               [-V]
-              [{read,write,random,index,benchmark,comprehensive,simultaneous,r,w,rw,wr,i,rwi,wri,c,b,s} ...]
+              [{read,write,random,index,meta,m,benchmark,comprehensive,simultaneous,r,w,rw,wr,i,rwi,wri,c,b,s} ...]
 
 Test total disk bandwidth. Default mode is write (w). Comprehensive mode: write -> move -> stat -> read
 
 positional arguments:
-  {read,write,random,index,benchmark,comprehensive,simultaneous,r,w,rw,wr,i,rwi,wri,c,b,s}
+  {read,write,random,index,meta,m,benchmark,comprehensive,simultaneous,r,w,rw,wr,i,rwi,wri,c,b,s}
                         The mode the script will operate in (default: write / w). COMPREHENSIVE: per-thread write ->
                         move -> stat -> read (what your code sees). WRITE: batched all-thread write. READ: batched
-                        all-thread read. INDEX: creates --file_count index folders, stat each, then delete. RWI / WRI:
-                        run write, then read, then index sequentially in batch mode. SIMULTANEOUS / S: layout write
-                        pass for read files, then concurrent write+read on separate files; cleans up afterward.
+                        all-thread read. INDEX: creates --file_count index folders, stat each, then delete. META / M:
+                        create, stat, then unlink --file_count empty files per process, each as its own timed pass
+                        (keys meta_create, meta_stat, meta_unlink); -fs does not apply. RWI / WRI: run write, then
+                        read, then index sequentially in batch mode. SIMULTANEOUS / S: layout write pass for read
+                        files, then concurrent write+read on separate files; cleans up afterward.
 
 options:
   -h, --help            show this help message and exit

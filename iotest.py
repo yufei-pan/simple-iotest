@@ -576,6 +576,47 @@ def stat_file(file_name, quiet=False):
 		worker_log(traceback.format_exc(), level='error', quiet=quiet)
 		return None,f'{type(e).__name__}: {e}',0
 
+META_PHASES = ('create', 'stat', 'unlink')
+
+def meta_dir_path(directory, counter_name):
+	return os.path.join(directory, str(counter_name), 'meta')
+
+def meta_file_path(directory, counter_name, index, file_count):
+	return os.path.join(meta_dir_path(directory, counter_name), f"meta_{str(index + 1).zfill(len(str(file_count)))}")
+
+def meta_file(phase, file_name, quiet=False):
+	start = time.perf_counter()
+	try:
+		if phase == 'create':
+			os.close(os.open(file_name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+		elif phase == 'stat':
+			os.stat(file_name)
+		else:
+			os.unlink(file_name)
+		return start, time.perf_counter()
+	except Exception as e:
+		worker_log(f'{phase} {file_name}: {e}', level='error', quiet=quiet)
+		return None, f'{type(e).__name__}: {e}'
+
+def remove_meta_leftovers(meta_dir):
+	# untimed: files an interrupted run left behind would make O_EXCL creates fail
+	try:
+		names = os.listdir(meta_dir)
+	except OSError:
+		return
+	for name in names:
+		if name.startswith('meta_'):
+			try:
+				os.unlink(os.path.join(meta_dir, name))
+			except OSError:
+				pass
+
+def remove_meta_dir(meta_dir):
+	try:
+		os.rmdir(meta_dir)
+	except OSError:
+		pass
+
 def op_time(op_result):
 	# helpers return (start, end, ...) on success and (None, error_text, ...) on failure;
 	# a failed op keeps its error text in place of a duration so it never enters the timing stats
@@ -624,6 +665,12 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		# make it now, before the start barrier, not in the timed window
 		content.prepare()
 	read_buffer = bytearray(block_size or file_size) if mode in ('read', 'random', 'comprehensive') else None
+	is_meta = mode.startswith('meta_')
+	if is_meta:
+		meta_dir = meta_dir_path(directory, counter)
+		if mode == 'meta_create':
+			os.makedirs(meta_dir, exist_ok=True)
+			remove_meta_leftovers(meta_dir)
 	if time.perf_counter() > thread_start_time:
 		worker_log(f'Worker {counter} started late, expected start time {thread_start_time}, actual start time {time.perf_counter()}', level='error', quiet=quiet)
 		if late_starts is not None:
@@ -633,14 +680,15 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 	while time.perf_counter() < thread_start_time:
 		# sleep for 1 ms
 		time.sleep(0.001)
-	os.makedirs(os.path.join(directory,str(counter)), exist_ok=True)
+	if not is_meta:
+		os.makedirs(os.path.join(directory,str(counter)), exist_ok=True)
 	reportInterval = max(file_count // 10,1)
 	for i in range(file_count):
 		# print a digit every 10% of the files
 		if i % reportInterval == 0 and quiet:
 				# stderr when stdout carries the JSON summary
 				print(f'\r{i//reportInterval}',end='',flush=True,file=sys.stderr if progress_to_stderr else None)
-		file_name = worker_file_path(directory, counter, i, file_count)
+		file_name = meta_file_path(directory, counter, i, file_count) if is_meta else worker_file_path(directory, counter, i, file_count)
 		write_file = functools.partial(content.write, index=i, quiet=quiet)
 		file_index = i + 1
 		i = str(file_index).zfill(len(str(file_count)))
@@ -705,6 +753,15 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 			index_time = op_time(op_result)
 			local_results.append(index_time)
 			log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tIndexed\t{format_op(index_time)}")
+		elif is_meta:
+			phase = mode[len('meta_'):]
+			op_result = meta_file(phase, file_name, quiet)
+			record_op(local_timeline, phase, counter, file_index, thread_start_time, attempt, op_result)
+			meta_time = op_time(op_result)
+			local_results.append(meta_time)
+			log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\t{phase.capitalize()}\t{format_op(meta_time)}")
+	if mode == 'meta_unlink':
+		remove_meta_dir(meta_dir)
 	log(f'Worker {counter} finished.')
 	results.extend(local_results)
 	if timeline is not None:
@@ -847,6 +904,18 @@ def remove_worker_files(entries):
 
 def cleanup_worker_files(directories, process_count, file_count):
 	remove_worker_files(worker_files(directories, process_count, file_count))
+
+def cleanup_meta_dirs(directories, process_count):
+	for counter in range(process_count):
+		directory = directories[counter % len(directories)]
+		counter_name = worker_counter_name(counter, process_count)
+		meta_dir = meta_dir_path(directory, counter_name)
+		remove_meta_leftovers(meta_dir)
+		remove_meta_dir(meta_dir)
+		try:
+			os.rmdir(os.path.join(directory, counter_name))
+		except OSError:
+			pass
 
 def leftover_hint(directories, process_counts, file_count):
 	paths = sorted({path for process_count in process_counts
@@ -1126,6 +1195,9 @@ def read_recreates_files(modes, directories, process_count, file_count, file_siz
 def memory_copies(modes, read_recreates=False):
 	# each worker holds one buffer: its file content (writers) or its read buffer (readers,
 	# simultaneous ones included). Workers that also write or recreate files hold both.
+	if 'meta' in modes and all(mode in ('meta', 'index') for mode in modes):
+		# metadata passes hold no data
+		return 0
 	if any(mode in ('random', 'comprehensive') for mode in modes) or ('read' in modes and read_recreates):
 		return 2
 	return 1
@@ -1404,7 +1476,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	mountinfo = read_mountinfo()
 	dedup_notes = []
 	# index and benchmark write no file data, so dedup cannot skew them
-	if not unique and not tuning_attempt and any(mode not in ('index', 'benchmark') for mode in modes):
+	if not unique and not tuning_attempt and any(mode not in ('index', 'benchmark', 'meta') for mode in modes):
 		dedup_notes = [note for note in (dedup_warning(d, mountinfo) for d in directories) if note]
 		for note in dedup_notes:
 			tl.teelog(note, level='warning')
@@ -1486,12 +1558,15 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			genTimeCalc = 0
 			processStartDelay = 0.005 * process_count + 1
 			tl.teeprint("Skipping file generation benchmark (no write workers in simultaneous mode)")
-		elif all(mode in ('read', 'index') for mode in modes) and not read_recreates:
+		elif all(mode in ('read', 'index', 'meta') for mode in modes) and not read_recreates:
 			# it estimates how long workers take to generate data before the start barrier
 			genSpeed = 0
 			genTimeCalc = 0
 			processStartDelay = 0.005 * process_count + 1
-			tl.teeprint("Skipping file generation benchmark (read and index workers generate no data up front)")
+			if 'meta' in modes:
+				tl.teeprint("Skipping file generation benchmark (read, index and meta workers generate no data up front)")
+			else:
+				tl.teeprint("Skipping file generation benchmark (read and index workers generate no data up front)")
 		else:
 			if zeros:
 				generator = 'zeros'
@@ -1526,7 +1601,14 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			tl.teeprint(f"Gen time calculated:   \t{genTimeCalc:.4f} s")
 			tl.teeprint(f"Process start delay:   \t{processStartDelay:.4f} s")
 		sync_start_at = options.start_at
+		# a meta run is three passes with their own barriers
+		pass_modes = []
 		for mode in modes:
+			if mode == 'meta':
+				pass_modes.extend('meta_' + phase for phase in META_PHASES)
+			else:
+				pass_modes.append(mode)
+		for mode in pass_modes:
 			if mode == 'benchmark':
 				continue
 			pass_index += 1
@@ -1621,7 +1703,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			totalEndTime =  time.perf_counter() - totalStartTime
 			dead_errors = dead_worker_errors(processes, file_count)
 			processes.clear()
-			collect_timeline(timeline_rows, pass_timeline, pass_index, mode)
+			collect_timeline(timeline_rows, pass_timeline, pass_index, 'meta' if mode.startswith('meta_') else mode)
 			if mode == 'comprehensive':
 				results = list(results) + [[error] * 4 for error in dead_errors]
 				writes = add_op_results(outResults,failedOps,'write',[result[0] for result in results])
@@ -1717,6 +1799,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		write_json_summary(options.json_path, build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors), tl, report_errors)
 	if options.cleanup:
 		cleanup_worker_files(directories, process_count, file_count)
+		if 'meta' in modes:
+			cleanup_meta_dirs(directories, process_count)
 	if options.message_end_point_address and short_reports:
 		send_short_reports(options.message_end_point_address, short_reports, tl)
 	return {
@@ -1738,6 +1822,7 @@ MODE_ALIASES = {
 	'rw': ['write', 'read'],
 	'wr': ['write', 'read'],
 	'i': ['index'],
+	'm': ['meta'],
 	'rwi': ['write', 'read', 'index'],
 	'wri': ['write', 'read', 'index'],
 	'c': ['comprehensive'],
@@ -1746,6 +1831,7 @@ MODE_ALIASES = {
 	'write': ['write'],
 	'random': ['random'],
 	'index': ['index'],
+	'meta': ['meta'],
 	'comprehensive': ['comprehensive'],
 	'benchmark': ['benchmark'],
 	's': ['simultaneous'],
@@ -2185,8 +2271,9 @@ def climain():
  WRITE: batched all-thread write.
  READ: batched all-thread read.
  INDEX: creates --file_count index folders, stat each, then delete.
+ META / M: create, stat, then unlink --file_count empty files per process, each as its own timed pass (keys meta_create, meta_stat, meta_unlink); -fs does not apply.
  RWI / WRI: run write, then read, then index sequentially in batch mode.
- SIMULTANEOUS / S: layout write pass for read files, then concurrent write+read on separate files; cleans up afterward.""",choices=['read', 'write','random','index','benchmark','comprehensive','simultaneous','r','w','rw','wr','i','rwi','wri','c','b','s'], default="w")
+ SIMULTANEOUS / S: layout write pass for read files, then concurrent write+read on separate files; cleans up afterward.""",choices=['read', 'write','random','index','meta','m','benchmark','comprehensive','simultaneous','r','w','rw','wr','i','rwi','wri','c','b','s'], default="w")
 	parser.add_argument("-q","--quiet", action="store_true", help="Kept for compatibility: quiet is the default. Use -v for per-file output",default=True)
 	parser.add_argument("-v","--verbose", action="store_true", help="Verbose output",default=False)
 	parser.add_argument("-S",'--stealth', action="store_true", help="Suppress verbose output and verbose log file",default=False)
