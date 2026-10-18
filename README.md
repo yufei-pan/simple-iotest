@@ -7,15 +7,17 @@ Using the most simple non-optimized write() or writev() with fallback to python 
 Warning: if using big file sizes, make sure you have enough memory to hold all these bits! (Or use `-bs`: each worker then holds one block instead of a whole file.)
 
 Note:
-	Recommand to also install the package Tee_Logger to also log your test results to your /var/log/ ( configurable ) for future keeping.
-
-Generated:
+	Tee_Logger is a required dependency and is installed automatically. Results are also logged to `/var/log/` by default (change it with `-ld`, or turn it off with `-nl`) for future keeping.
 
 This script tests I/O performance by creating, reading, moving, and indexing files in various modes. It allows you to measure different aspects of disk performance and log the results.
 
 ## Installation
 ```bash
 pipx install simple-iotest
+```
+Optionally install numpy, which speeds up generating the random test data:
+```bash
+pipx install 'simple-iotest[fast]'
 ```
 
 ## Usage
@@ -33,16 +35,23 @@ Default mode is **write** (`w`) when no mode is specified.
 - `-fs, --file_size`: Size of the test files (default: 30 MiB; suffix `m`, `g`, etc. supported).  
 - `-bs, --block_size`: Writes and reads each file in calls of this size (same units as `-fs`), from one buffer of this size per worker instead of one the size of a file, so large files need little memory and small-I/O patterns can be tested. Default: unset, one call per file; a block size at least the file size is the same as unset. A short write or read is retried with the rest of its block, and a written file is synced once, after its last block. An operation is still one whole file: its time covers every block, and IOPS count files. Without `-u`, every block of a file is the same data, so deduplicating storage may store it once; with `-u`, each block is stamped with its place in the file just before it is written, inside the timed write (without `-bs` the whole file is stamped before the timer starts).  
 - `-fc, --file_count`: Number of files to process per worker (default: 50).  
-- `-pc, --process_count`: Number of worker processes (default: 36).  
+- `-pc, -t, --process_count`: Number of worker processes (default: 36).  
+- `-ts, --total_size`: Total size target. If one of `-fs`, `-fc` and `-pc` is omitted, it is calculated to fit this total (the file count first, then the file size, then the process count); it is ignored, with a warning, when all three are given.  
 - `-wtpt, --write_target_throughput`: Target sync write throughput (e.g. `500m`, `2g`); auto-tunes the first write pass.  
 - `-rtpt, --read_target_throughput`: Target sync read throughput; auto-tunes the first read pass. For simultaneous mode with both targets, the initial writer/reader split is estimated from the target ratio before tuning.  
 - `-d, --directory`: Directory for file operations.  
-- `-q, --quiet`: Suppresses output.  
+- `-ld, --log_directory`: Directory for the log files (default: `/var/log/`).  
+- `-q, --quiet`: Kept for compatibility: quiet is the default.  
+- `-v, --verbose`: Prints per-file output.  
+- `-S, --stealth`: Suppresses the console output and the verbose log file.  
 - `-z, --zeros`: Uses zero-filled data instead of random.  
 - `-u, --unique_files`: Stamps every 512-byte block with (file, block, worker) so no two blocks of the run are identical, even with `-z`. By default each worker writes the same buffer to all its files, which storage with deduplication (ZFS `dedup=on`, NetApp, Pure, VAST, ...) can store once and report as optimistic. iotest warns when a target directory is on ZFS with dedup enabled or on NFS/SMB. Stamping adds a few ms per 30 MiB file to sync times.  
 - `--verify`: Makes every test file self-checking, for storage acceptance tests. Each file ends with 4 bytes holding the CRC-32 (little-endian, as `zlib.crc32` computes it) of all the bytes before them, and every read (`read`, `random`, `comprehensive` and the `simultaneous` readers) checks it, in this run or any later one, without iotest storing anything. A mismatch fails that read with `verify failed: <path>: CRC-32 mismatch (stored 0x…, computed 0x…)`, so it counts in the failed ops and iotest exits 1. This detects bit flips and torn or misplaced writes (a write that only partly reached the media, or data that landed in another file or at another offset): `--verify` implies `-u`, so no two blocks are the same and a block in the wrong place changes the CRC. A file is checked only against itself, so a whole write that was lost while an older, intact file of the same name stayed is not detected. Files written without `--verify` have no CRC and fail the check: write them with `--verify` too before reading them with it. Needs a file size of at least 8 bytes (exit 2 otherwise). CPU cost: one CRC-32 pass over every byte written and read (about 8 GiB/s per core with zlib 1.3; it depends on the zlib build and the CPU). Without `-bs` it runs outside the op time, before each timed write and after each timed read, so only the sync figures include it; with `-bs` it runs block by block inside the timed op, like `-u` stamping.  
 - `-cl, --cleanup`: Deletes the test files when the run ends. By default they are kept so a later `read` run can reuse them (the default settings leave about 53 GiB). Before writing, iotest checks free space per filesystem and refuses to start (exit 1) if the run would not fit.  
 - `-nl, --no_log`: Disables log file creation.  
+- `-addr, --message_end_point_address`: Posts a short report of each result to this URL, as Discord-style JSON (`{"content": "..."}`) with a `POST`. A failure to post is logged and does not change the exit code.  
+- `--threshold_to_report_anomaly`: Adds a warning to the report when a mode's 99th-percentile latency is more than this many times its 1st-percentile latency (default: 0, off).  
+- `-bt, --benchmark_time`: Seconds to spend benchmarking test data generation speed before the run (default: 5).  
 - `-nr, --no_report`: Disables result report creation.  
 - `-j, --json PATH`: Writes a JSON summary of the run to `PATH` after the text report, also with `-nr`. `-` prints it to stdout instead; with `-S`, stdout then carries only the JSON (worker progress digits go to stderr). With throughput tuning it describes the final run. A summary that cannot be written exits 1, like other result files.  
 
@@ -51,6 +60,7 @@ Default mode is **write** (`w`) when no mode is specified.
 - `read` / `r`: Only file reads.  
 - `index` / `i`: Create and remove temporary index folders.  
 - `meta` / `m`: Metadata rates, like mdtest. Three passes in order, each with its own start barrier: create, stat, then unlink `-fc` empty files per process (under `<directory>/<counter>/meta/`, as `meta_<i>`). Results are under the keys `meta_create`, `meta_stat` and `meta_unlink`, and the timeline's `mode` is `meta` with `op` `create`, `stat` or `unlink`. They have IOPS and latency but no bandwidth, since no data is moved; `-fs` and `-bs` do not apply and no memory is reserved for file content. Leftover meta files of an interrupted run are removed (untimed) before the create pass, the empty meta directories are removed after the unlink pass, and `-cl` removes any left behind. A file missing in the stat or unlink pass counts as a failed operation.  
+- `benchmark` / `b`: Only measures how fast the test data can be generated; no test files are written.  
 - `random`: Random read/write steps. Reads and writes are reported separately, as `random_write` and `random_read` (and as separate CSV columns); both use the whole pass's wall time for the sync figures.  
 - `comprehensive` / `c`: write → move → stat → read per file. Each section ends with a note that its sync figures are estimates: the pass time is split across write/move/stat/read by their share of op time.  
 - `rw` / `wr`: Run write, then read sequentially in batch mode.  
@@ -61,7 +71,7 @@ Example:
 ```bash
 iotest -fs 50m -fc 100 -pc 4 -d /tmp/iotest write read
 ```
-Will launch 4 processes each write same random 50MiB size data to 100 seperate files sequentially.
+Will launch 4 processes each write same random 50MiB size data to 100 separate files sequentially.
 Then will launch another 4 processes reading the same files.
 
 Simultaneous read/write example:
@@ -166,5 +176,7 @@ options:
                         Target sync write throughput (e.g. 500m, 2g). Auto-tunes the first write pass.
   -rtpt, --read_target_throughput READ_TARGET_THROUGHPUT
                         Target sync read throughput (e.g. 500m, 2g). Auto-tunes the first read pass.
+  --start_at EPOCH      Start the first timed pass at this time, in seconds since the Unix epoch (e.g. $(date -d '+1
+                        min' +%s)), so several hosts start together. Clocks must be in sync
   -V, --version         show program's version number and exit
 ```
