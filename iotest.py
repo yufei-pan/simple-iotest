@@ -15,6 +15,12 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+
+try:
+	import fcntl
+except ImportError:
+	# Windows has no fcntl
+	fcntl = None
 from multiprocessing import Manager, Process
 
 numpy_available = False
@@ -320,15 +326,21 @@ def make_file_content(file_size, zeros, unique):
 # INT_MAX with EINVAL, so large files are moved in chunks of at most this size.
 MAX_IO_CHUNK = 0x7ffff000
 
+def disable_os_cache(fd):
+	# macOS has no posix_fadvise; F_NOCACHE keeps its pages out of the cache instead
+	# (set on the write fd too, so a read cannot hit pages the write left cached)
+	no_cache = getattr(fcntl, 'F_NOCACHE', None)
+	if no_cache is None:
+		return
+	try:
+		fcntl.fcntl(fd, no_cache, 1)
+	except OSError:
+		pass
+
 def create_file(file_name, file_content, file_size, quiet=False):
 	try:
 		with open(file_name, "wb", buffering=0) as f:
-			try:
-				if os.name == 'posix':
-					os.posix_fadvise(f.fileno(), 0, file_size, os.POSIX_FADV_DONTNEED)
-			except (AttributeError, OSError):
-				# AttributeError: macOS is posix but has no posix_fadvise
-				worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
+			disable_os_cache(f.fileno())
 			start_write_time = time.perf_counter()
 			view = memoryview(file_content)
 			written = 0
@@ -347,6 +359,13 @@ def create_file(file_name, file_content, file_size, quiet=False):
 				written += n
 			os.fsync(f.fileno())
 			end_write_time = time.perf_counter()
+			# after the sync the pages are clean and can be dropped; before the write the file is empty
+			try:
+				if os.name == 'posix':
+					os.posix_fadvise(f.fileno(), 0, file_size, os.POSIX_FADV_DONTNEED)
+			except (AttributeError, OSError):
+				# AttributeError: macOS is posix but has no posix_fadvise
+				worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
 			return start_write_time,end_write_time
 	except Exception as e:
 		import traceback
@@ -386,6 +405,7 @@ def read_file(file_name, file_content, file_size, quiet=False, buffer=None, recr
 				return None, f"recreating missing {file_name}: {created[1]}"
 
 		with open(file_name, "rb", buffering=0) as f:
+			disable_os_cache(f.fileno())
 			try:
 				if os.name == 'posix':
 					os.posix_fadvise(f.fileno(), 0, file_size, os.POSIX_FADV_DONTNEED)
@@ -476,7 +496,7 @@ def worker_color_log(color, msg, quiet=False):
 	r, g, b = color
 	worker_log(f'\033[38;2;{r};{g};{b}m{msg}\033[0m', quiet=quiet)
 
-def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False):
+def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False, late_starts=None):
 	local_results = []
 	log = functools.partial(worker_color_log, int_to_color(os.getpid()), quiet=quiet)
 	log(f'Worker {counter} scheduled to start at {thread_start_time-time.perf_counter():.4f} later in {mode} mode.')
@@ -492,6 +512,8 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 	read_buffer = bytearray(file_size) if mode in ('read', 'random', 'comprehensive') else None
 	if time.perf_counter() > thread_start_time:
 		worker_log(f'Worker {counter} started late, expected start time {thread_start_time}, actual start time {time.perf_counter()}', level='error', quiet=quiet)
+		if late_starts is not None:
+			late_starts.append(time.perf_counter() - thread_start_time)
 	log(f'Worker {counter} primed, waiting for {thread_start_time-time.perf_counter():.4f} seconds.')
 	# wait until thread_start_time
 	while time.perf_counter() < thread_start_time:
@@ -520,11 +542,11 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 			# here we start a random read or write
 			if bool(random.getrandbits(1)):
 				write_time = op_time(create_file(file_name, file_content, file_size, quiet=quiet))
-				local_results.append(write_time)
+				local_results.append(('write', write_time))
 				log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\t{format_op(write_time)}")
 			else:
 				read_time = op_time(read_file(file_name, file_content, file_size, quiet, buffer=read_buffer))
-				local_results.append(read_time)
+				local_results.append(('read', read_time))
 				log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\t{format_op(read_time)}")
 		elif mode == 'comprehensive':
 			resultList = []
@@ -713,7 +735,7 @@ def layout_read_worker(file_count, file_size, base_directory, run_id, counter, q
 		file_name = os.path.join(worker_dir, f"read_{i_str}.bin")
 		create_file(file_name, file_content, file_size, quiet=quiet)
 
-def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id, counter, results, quiet, zeros, thread_start_time, unique=False):
+def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id, counter, results, quiet, zeros, thread_start_time, unique=False, late_starts=None):
 	local_results = []
 	log = functools.partial(worker_color_log, int_to_color(os.getpid()), quiet=quiet)
 	log(f'Worker {counter} ({role}) scheduled to start at {thread_start_time-time.perf_counter():.4f} later.')
@@ -721,6 +743,8 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 	file_content = make_file_content(file_size, zeros, unique) if role == 'write' else None
 	stamp_id = new_stamp_id()
 	recreate_content = RecreateContent(file_size, zeros, unique, stamp_id)
+	if late_starts is not None and time.perf_counter() > thread_start_time:
+		late_starts.append(time.perf_counter() - thread_start_time)
 	while time.perf_counter() < thread_start_time:
 		time.sleep(0.001)
 	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
@@ -828,6 +852,15 @@ def add_op_results(outResults, failedOps, key, samples):
 	addToDicWithoutOverwrite(outResults, key, times)
 	addToDicWithoutOverwrite(failedOps, key, [s for s in samples if isinstance(s, str)])
 	return times
+
+def record_pass_meta(late_starts, sync_estimated, key, late, estimated):
+	# kept in lockstep with outResults, so a repeated key is renamed in all of them
+	addToDicWithoutOverwrite(late_starts, key, (len(late), max(late) if late else 0.0))
+	addToDicWithoutOverwrite(sync_estimated, key, estimated)
+
+def warn_late_starts(tl, mode, late, process_count):
+	if late:
+		tl.teelog(f"{len(late)} of {process_count} workers started late in {mode} mode, up to {max(late):.4f} s late; sync figures include the delay.", level='warning')
 
 def dead_worker_errors(processes, file_count):
 	# a worker hands its results over only at the very end, so one that dies
@@ -1099,6 +1132,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	processes = []
 	outResults = dict()
 	failedOps = {}
+	late_starts = {}
+	sync_estimated = {}
 	totalTime = {}
 	mode_process_counts = {}
 	read_recreates = read_recreates_files(modes, directories, process_count, file_count, file_size)
@@ -1228,6 +1263,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 							layout_padding_pc, quiet, zeros, tl, unique)
 					write_results = manager.list()
 					read_results = manager.list()
+					write_late = manager.list()
+					read_late = manager.list()
 					write_processes = []
 					read_processes = []
 					thread_start_time = time.perf_counter() + processStartDelay
@@ -1237,14 +1274,14 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 						# the layout's padding, not this run's: tuning attempts at smaller counts then
 						# overwrite the same writer files instead of adding a second set
 						counter_str = worker_counter_name(counter, layout_padding_pc)
-						p = Process(target=simultaneous_role_worker, args=('write', file_count, file_size, assigned_directory, run_id, counter_str, write_results, quiet, zeros, thread_start_time, unique))
+						p = Process(target=simultaneous_role_worker, args=('write', file_count, file_size, assigned_directory, run_id, counter_str, write_results, quiet, zeros, thread_start_time, unique, write_late))
 						write_processes.append(p)
 					for counter in range(read_count):
 						assigned_directory = directories[counter % len(directories)]
 						# readers read the layout pass's files, so they use its padding (the tuner
 						# lays out for its largest process count and then runs smaller attempts)
 						counter_str = worker_counter_name(counter, layout_padding_pc)
-						p = Process(target=simultaneous_role_worker, args=('read', file_count, file_size, assigned_directory, run_id, counter_str, read_results, quiet, zeros, thread_start_time, unique))
+						p = Process(target=simultaneous_role_worker, args=('read', file_count, file_size, assigned_directory, run_id, counter_str, read_results, quiet, zeros, thread_start_time, unique, read_late))
 						read_processes.append(p)
 					totalStartTime = thread_start_time
 					for p in write_processes + read_processes:
@@ -1261,6 +1298,9 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					addToDicWithoutOverwrite(totalTime, 'read', read_sync_time)
 					addToDicWithoutOverwrite(mode_process_counts, 'write', write_count)
 					addToDicWithoutOverwrite(mode_process_counts, 'read', read_count)
+					record_pass_meta(late_starts, sync_estimated, 'write', write_late, False)
+					record_pass_meta(late_starts, sync_estimated, 'read', read_late, False)
+					warn_late_starts(tl, 'simultaneous', list(write_late) + list(read_late), process_count)
 				finally:
 					if not simultaneous_skip_cleanup:
 						cleanup_simultaneous_tree(directories, run_id, layout_padding_pc)
@@ -1268,11 +1308,12 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				continue
 			processes = []
 			results = manager.list()
+			late = manager.list()
 			thread_start_time = time.perf_counter() + processStartDelay
 			for counter in range(process_count):
 				assigned_directory = directories[counter % len(directories)]
 				counter = worker_counter_name(counter, process_count)
-				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, read_recreates))
+				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, read_recreates, late))
 				processes.append(p)
 			totalStartTime = thread_start_time
 			for p in processes:
@@ -1295,6 +1336,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				sumAllTime = sumWTime + sumMTime + sumSTime + sumRTime
 				for key in ('write','move','stat','read'):
 					addToDicWithoutOverwrite(mode_process_counts,key,process_count)
+					record_pass_meta(late_starts, sync_estimated, key, late, True)
 				if sumAllTime > 0:
 					addToDicWithoutOverwrite(totalTime,'write',totalEndTime * (sumWTime / sumAllTime))
 					addToDicWithoutOverwrite(totalTime,'move',totalEndTime * (sumMTime / sumAllTime))
@@ -1305,10 +1347,26 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					addToDicWithoutOverwrite(totalTime,'move',totalEndTime)
 					addToDicWithoutOverwrite(totalTime,'stat',totalEndTime)
 					addToDicWithoutOverwrite(totalTime,'read',totalEndTime)
+			elif mode == 'random':
+				# a result is (kind, time); dead workers never reported, so their kind is unknown
+				for kind in ('write', 'read'):
+					kind_results = [r[1] for r in results if r[0] == kind]
+					if kind_results:
+						add_op_results(outResults,failedOps,'random_' + kind,kind_results)
+						addToDicWithoutOverwrite(totalTime,'random_' + kind,totalEndTime)
+						addToDicWithoutOverwrite(mode_process_counts,'random_' + kind,process_count)
+						record_pass_meta(late_starts, sync_estimated, 'random_' + kind, late, False)
+				if dead_errors:
+					add_op_results(outResults,failedOps,'random',dead_errors)
+					addToDicWithoutOverwrite(totalTime,'random',totalEndTime)
+					addToDicWithoutOverwrite(mode_process_counts,'random',process_count)
+					record_pass_meta(late_starts, sync_estimated, 'random', late, False)
 			else:
 				add_op_results(outResults,failedOps,mode,list(results) + dead_errors)
 				addToDicWithoutOverwrite(totalTime,mode,totalEndTime)
 				addToDicWithoutOverwrite(mode_process_counts,mode,process_count)
+				record_pass_meta(late_starts, sync_estimated, mode, late, False)
+			warn_late_starts(tl, mode, list(late), process_count)
 	report_errors = []
 	if not options.no_report and outResults:
 		report_base = os.path.join(primary_directory, report_base_name(modes, directories, file_size, file_count, process_count, tl.currentDateTime))
@@ -1334,9 +1392,12 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		failed = failedOps.get(mode, [])
 		op_count = len(outResults[mode]) + len(failed)
 		failed_note = ''
+		late_n, late_max = late_starts.get(mode, (0, 0.0))
 		if failed:
 			failed_note = f", {len(failed)} of {op_count} ops failed"
 			report.append(f"Failed {mode} ops:      \t{len(failed)} of {op_count}, first error: {failed[0]}")
+		if late_n:
+			report.append(f"Late starts:           \t{late_n} of {mode_process_counts.get(mode, process_count)} workers, up to {late_max:.4f} s late (sync figures include the delay)")
 		if not outResults[mode]:
 			report.append(f"No successful {mode} ops, skipping timing statistics.")
 			report.append("-"*80)
@@ -1371,6 +1432,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		report.append(f"1 % high {mode} time:   \t{one_percent_high_time:.4f} s")
 		report.append(f"0.1 % high {mode} time: \t{zero_point_one_percent_high_time:.4f} s")
 		report.append(f"Highest {mode} time:    \t{highest_time:.4f} s")
+		if sync_estimated.get(mode):
+			report.append("Note: sync figures are estimates: comprehensive mode splits the pass time across write/move/stat/read by their share of op time.")
 		report.append("-"*80)
 		if threshold_to_report_anomaly and threshold_to_report_anomaly > 0 and one_percent_high_time > (one_percent_low_time * threshold_to_report_anomaly):
 			report.append("Warning | iotest: 1% high is too high compared to 1% low!")
@@ -1409,6 +1472,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		'file_count': file_count,
 		'mode_process_counts': mode_process_counts,
 		'failedOps': failedOps,
+		'late_starts': late_starts,
+		'sync_estimated': sync_estimated,
 		'report_errors': report_errors,
 	}
 

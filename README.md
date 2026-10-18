@@ -47,8 +47,8 @@ Default mode is **write** (`w`) when no mode is specified.
 - `write` / `w`: Only file writes (default).  
 - `read` / `r`: Only file reads.  
 - `index` / `i`: Create and remove temporary index folders.  
-- `random`: Random read/write steps.  
-- `comprehensive` / `c`: write → move → stat → read per file.  
+- `random`: Random read/write steps. Reads and writes are reported separately, as `random_write` and `random_read` (and as separate CSV columns); both use the whole pass's wall time for the sync figures.  
+- `comprehensive` / `c`: write → move → stat → read per file. Each section ends with a note that its sync figures are estimates: the pass time is split across write/move/stat/read by their share of op time.  
 - `rw` / `wr`: Run write, then read sequentially in batch mode.  
 - `simultaneous` / `s`: Pre-writes read targets, then runs half the workers writing and half reading concurrently on separate files. Removes all temp files when done.  
 - `rwi` / `wri`: Run write, then read, then index sequentially in batch mode.
@@ -58,6 +58,10 @@ Example:
 iotest -fs 50m -fc 100 -pc 4 -d /tmp/iotest write read
 ```
 Will launch 4 processes each write same random 50MiB size data to 100 seperate files sequentially.
+
+### Measurement notes
+- Page cache: after each write is synced, iotest drops the file's pages (`posix_fadvise(DONTNEED)`) and before each read it does the same, so results reflect the storage. On macOS, which has no `posix_fadvise`, `F_NOCACHE` is set on every test file instead. On Windows neither exists, so reads may be served from cache.
+- Late starts: workers wait for a common start time. If some reach it late (for example, a slow start under heavy load), the report adds a line such as `Late starts:  3 of 36 workers, up to 0.0412 s late (sync figures include the delay)` and a warning is logged, even without `-v`. The returned result also carries them as `late_starts`.
 Then will launch another 4 processes reading the same files.
 
 Simultaneous read/write example:
