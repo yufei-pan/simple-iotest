@@ -115,3 +115,8 @@ def test_invalid_arguments_exit_2_without_traceback(tmp_path, args, needle):
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert needle in proc.stderr
     assert "Traceback" not in proc.stdout + proc.stderr
+
+
+def test_report_is_printed_exactly_once(run_main, rec_tl):
+    run_main(["write"], tl=rec_tl, no_report=False)
+    assert sum("Report for write mode" in line for line in rec_tl.printed) == 1

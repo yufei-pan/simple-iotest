@@ -1381,7 +1381,6 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			else:
 				short_report = f"Short Report for {mode} mode: {format_iops(call_iops)} IOPS, avg {avg_time:.4f} s, median {median_time:.4f} s"
 			short_reports.append(short_report + failed_note)
-	tl.teeprint('\n'.join(report))
 	# the text report goes first, so a failing result file cannot lose it
 	tl.teeprint('\n'.join(report))
 	if not options.no_report and outResults:
