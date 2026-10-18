@@ -91,6 +91,7 @@ def make_late(iotest_mod, monkeypatch, seconds=5):
     monkeypatch.setattr(iotest_mod, "worker", late_worker)
 
 
+@pytest.mark.patches_workers
 def test_late_start_is_reported_and_warned(run_main, rec_tl, iotest_mod, monkeypatch):
     make_late(iotest_mod, monkeypatch)
     result = run_main(["write"], tl=rec_tl, process_count=2)
@@ -103,6 +104,7 @@ def test_late_start_is_reported_and_warned(run_main, rec_tl, iotest_mod, monkeyp
     assert len([m for m in rec_tl.logged if "started late" in m]) == 1
 
 
+@pytest.mark.patches_workers
 def test_late_start_line_in_every_section_of_the_pass(run_main, rec_tl, iotest_mod, monkeypatch):
     make_late(iotest_mod, monkeypatch)
     result = run_main(["comprehensive"], tl=rec_tl)
@@ -117,12 +119,14 @@ def test_no_late_line_when_nobody_is_late(run_main, rec_tl):
     assert not any("Late starts" in m for m in rec_tl.messages)
 
 
+@pytest.mark.patches_workers
 def test_late_starts_follow_renamed_keys(run_main, iotest_mod, monkeypatch):
     make_late(iotest_mod, monkeypatch)
     result = run_main(["write", "write"])
     assert set(result["late_starts"]) == set(result["outResults"]) == {"write_1", "write_2"}
 
 
+@pytest.mark.patches_workers
 def test_random_mode_reports_reads_and_writes_separately(run_main, rec_tl, iotest_mod, monkeypatch):
     # both kinds must occur, so alternate instead of relying on luck
     flips = iter([1, 0, 1, 0])
@@ -139,12 +143,14 @@ def test_random_mode_reports_reads_and_writes_separately(run_main, rec_tl, iotes
     assert result["mode_process_counts"] == {"random_write": 1, "random_read": 1}
 
 
+@pytest.mark.patches_workers
 def test_random_mode_only_lists_kinds_that_occurred(run_main, iotest_mod, monkeypatch):
     monkeypatch.setattr(iotest_mod.random, "getrandbits", lambda n: 1)
     result = run_main(["random"], file_count=2)
     assert list(result["outResults"]) == ["random_write"]
 
 
+@pytest.mark.patches_workers
 def test_random_mode_csv_columns_follow_the_keys(run_main, iotest_mod, work_dir, monkeypatch):
     flips = iter([1, 0, 1, 0])
     monkeypatch.setattr(iotest_mod.random, "getrandbits", lambda n: next(flips))
@@ -154,6 +160,7 @@ def test_random_mode_csv_columns_follow_the_keys(run_main, iotest_mod, work_dir,
     assert csvs[0].read_text().splitlines()[0] == "random_write_time,random_read_time"
 
 
+@pytest.mark.patches_workers
 def test_random_mode_dead_worker_failures_go_under_random(run_main, iotest_mod, monkeypatch):
     def dying_worker(*args):
         os._exit(3)

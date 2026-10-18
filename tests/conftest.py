@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import subprocess
 import sys
 from pathlib import Path
@@ -16,19 +17,29 @@ except ImportError:
     Tee_Logger = iotest_module.Tee_Logger  # noqa: E402
 
 
-def pytest_collection_modifyitems(config, items):
-    # macOS and Windows start workers with spawn, so what a test patches in this process never reaches
-    # them. macOS can fork instead (see below); Windows cannot, so the tests that rely on it are skipped there.
-    if sys.platform == "win32":
-        skip = pytest.mark.skip(reason="patches do not reach spawned workers on Windows")
-        for item in items:
-            if {"monkeypatch", "run_main"} <= set(item.fixturenames):
-                item.add_marker(skip)
+def pytest_configure(config):
+    config.addinivalue_line("markers", "patches_workers: patches module state that the worker processes must see, so they "
+                            "have to be forked (macOS) and cannot run on Windows")
 
 
-if sys.platform == "darwin":
-    import multiprocessing
-    multiprocessing.set_start_method("fork", force=True)
+@pytest.fixture(autouse=True)
+def start_method_for_patched_workers(request):
+    # iotest starts workers with the platform's default start method: fork on Linux, spawn on macOS and Windows.
+    # Spawned workers import the module afresh, so a test that patches module state for them (a worker
+    # function, random, os.writev, ...) only works with fork: macOS is switched to it for those tests and
+    # Windows, which has no fork, skips them. Every other test, including the plain write/read ones, runs with
+    # the default method, which is what the real command uses.
+    if request.node.get_closest_marker("patches_workers") is None:
+        yield
+    elif sys.platform == "win32":
+        pytest.skip("Windows has no fork, so patches do not reach the spawned workers")
+    elif sys.platform == "darwin":
+        previous = multiprocessing.get_start_method(allow_none=True)
+        multiprocessing.set_start_method("fork", force=True)
+        yield
+        multiprocessing.set_start_method(previous, force=True)
+    else:
+        yield
 
 
 @pytest.fixture

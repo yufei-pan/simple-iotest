@@ -323,6 +323,7 @@ def test_block_size_at_least_the_file_size_is_unset(iotest_mod):
     assert iotest_mod.effective_block_size(1000, 4096) == 1000
 
 
+@pytest.mark.patches_workers
 @pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 @pytest.mark.parametrize("block_size", [4096, 8192])
 def test_block_size_at_least_the_file_size_makes_the_same_calls_as_unset(run_main, iotest_mod, monkeypatch, tmp_path, block_size):

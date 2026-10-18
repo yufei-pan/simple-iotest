@@ -65,6 +65,16 @@ def test_cli_tiny_write(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+def test_cli_write_then_read(tmp_path):
+    # unpatched, in a fresh interpreter: the real command with the platform's own worker start method (spawn on macOS and Windows)
+    work = tmp_path / "w"
+    work.mkdir()
+    proc = run_iotest(["-fs", "1k", "-fc", "2", "-pc", "2", "-d", str(work), "-nl", "-nr", "-z", "-bt", "1", "write", "read"])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Report for write mode:" in proc.stdout and "Report for read mode:" in proc.stdout
+    assert len(list(work.rglob("temp_*.bin"))) == 4
+
+
 def test_cli_exits_nonzero_when_ops_fail(tmp_path):
     work = tmp_path / "w"
     blocker = work / "0" / "temp_1.bin"

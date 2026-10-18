@@ -1,6 +1,8 @@
 import csv
 import os
 
+import pytest
+
 
 def test_meta_alias(iotest_mod):
     assert iotest_mod.parse_modes(["m"]) == ["meta"]
@@ -54,6 +56,7 @@ def test_meta_file_missing_is_a_failed_op(iotest_mod, work_dir):
     os.unlink(path)
 
 
+@pytest.mark.patches_workers
 def test_meta_failed_stat_counts_in_run(run_main, iotest_mod, monkeypatch):
     real = iotest_mod.meta_file
 
