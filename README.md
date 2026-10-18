@@ -67,8 +67,8 @@ iotest -fs 50m -fc 20 -pc 8 -d /tmp/iotest simultaneous
 
 ### Exit codes
 - `0`: the run completed and every operation succeeded.
-- `1`: at least one I/O operation failed (the report shows how many and the first error), the target does not have enough free space (nothing is written), or throughput tuning could not reach its target.
-- `2`: invalid arguments, e.g. `-fc 0`.
+- `1`: at least one I/O operation failed (the report shows how many and the first error), the target does not have enough free space (nothing is written), throughput tuning could not reach its target, or a result file could not be written (the report is still printed).
+- `2`: invalid arguments, e.g. `-fc 0` or an unparseable `-fs`.
 
 Check the available arguments with `-h` or `--help` for more details.
 

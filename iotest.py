@@ -2,6 +2,7 @@
 import argparse
 import datetime
 import functools
+import hashlib
 import itertools
 import json
 import os
@@ -1020,6 +1021,36 @@ def dedup_warning(directory, mountinfo_lines):
 	return (f"Warning! {directory} {reason}. Each worker writes identical files, "
 		"so results may be optimistic. Use -u/--unique_files to make every file unique.")
 
+REPORT_SUFFIXES = ('.csv', '_report.txt')
+
+def report_base_name(modes, directories, file_size, file_count, process_count, current_date_time):
+	dir_str_repr = "_".join([d.replace('/','-').replace('\\','-').replace(':','-').replace('--','-').replace(' ','_') for d in directories])
+	head = f"iotest_{'-'.join(modes)}_"
+	tail = f"_fs={file_size}_fc={file_count}_pc={process_count}_{current_date_time}"
+	# file names are limited to 255 bytes, so only the directory part may shrink
+	room = 255 - max(len(suffix.encode('utf-8')) for suffix in REPORT_SUFFIXES) - len((head + tail).encode('utf-8'))
+	if len(dir_str_repr.encode('utf-8')) > room:
+		marker = '~' + hashlib.sha1(dir_str_repr.encode('utf-8')).hexdigest()[:8]
+		room -= len(marker)
+		kept = ''
+		for char in dir_str_repr:
+			if len((kept + char).encode('utf-8')) > room:
+				break
+			kept += char
+		dir_str_repr = kept + marker
+	return head + dir_str_repr + tail
+
+def write_report_file(path, write_content, tl, report_errors):
+	try:
+		with open(path, "w") as f:
+			write_content(f)
+	except OSError as e:
+		message = f"Could not write {path}: {e}"
+		tl.teeerror(message)
+		report_errors.append(message)
+		return False
+	return True
+
 def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None,unique=False,cleanup=False):
 	# the original entry point, kept for callers that pass options one by one
 	options = RunOptions(file_size=file_size, file_count=file_count, process_count=process_count,
@@ -1278,22 +1309,9 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				add_op_results(outResults,failedOps,mode,list(results) + dead_errors)
 				addToDicWithoutOverwrite(totalTime,mode,totalEndTime)
 				addToDicWithoutOverwrite(mode_process_counts,mode,process_count)
-	# write the outResults to a csv file
+	report_errors = []
 	if not options.no_report and outResults:
-		dir_str_repr = "_".join([d.replace('/','-').replace('\\','-').replace(':','-').replace('--','-').replace(' ','_') for d in directories])
-		csv_file_name = os.path.join(primary_directory, f"iotest_{'-'.join(modes)}_{dir_str_repr}_fs={file_size}_fc={file_count}_pc={process_count}_{tl.currentDateTime}.csv")
-		with open(csv_file_name, "w") as f:
-			# the headers are just the keys in the dic, 
-			# the values are the list of results
-			# we need to transpose the list of results
-			# so that we can write it to the csv file
-			# first, we write the header
-			f.write(','.join([key+'_time' for key in outResults.keys()]) + '\n')
-			# then we write the results; columns can differ in length (uneven
-			# simultaneous splits, failed ops), so pad short ones with blank cells
-			for row in itertools.zip_longest(*outResults.values(), fillvalue=''):
-				f.write(','.join(map(str,row)) + '\n')
-		tl.teeprint(f"\nResults written to {csv_file_name}")
+		report_base = os.path.join(primary_directory, report_base_name(modes, directories, file_size, file_count, process_count, tl.currentDateTime))
 	# calculate the summary for each key in outResults
 	# we need to calculate:
 	# average time
@@ -1364,12 +1382,21 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				short_report = f"Short Report for {mode} mode: {format_iops(call_iops)} IOPS, avg {avg_time:.4f} s, median {median_time:.4f} s"
 			short_reports.append(short_report + failed_note)
 	tl.teeprint('\n'.join(report))
-	# write the report to a file
+	# the text report goes first, so a failing result file cannot lose it
+	tl.teeprint('\n'.join(report))
 	if not options.no_report and outResults:
-		report_file_name = os.path.join(primary_directory, f"iotest_{'-'.join(modes)}_{dir_str_repr}_fs={file_size}_fc={file_count}_pc={process_count}_{tl.currentDateTime}_report.txt")
-		with open(report_file_name, "w") as f:
-			f.write('\n'.join(report))
-		tl.teeprint(f"Report written to {report_file_name}")
+		csv_file_name = report_base + REPORT_SUFFIXES[0]
+		def write_csv(f):
+			# the headers are just the keys in the dic, the values are the list of results
+			f.write(','.join([key+'_time' for key in outResults.keys()]) + '\n')
+			# columns can differ in length (uneven simultaneous splits, failed ops), so pad short ones with blank cells
+			for row in itertools.zip_longest(*outResults.values(), fillvalue=''):
+				f.write(','.join(map(str,row)) + '\n')
+		if write_report_file(csv_file_name, write_csv, tl, report_errors):
+			tl.teeprint(f"\nResults written to {csv_file_name}")
+		report_file_name = report_base + REPORT_SUFFIXES[1]
+		if write_report_file(report_file_name, lambda f: f.write('\n'.join(report)), tl, report_errors):
+			tl.teeprint(f"Report written to {report_file_name}")
 		print(f"Log file: {tl.logFileName}")
 	if options.cleanup:
 		cleanup_worker_files(directories, process_count, file_count)
@@ -1383,6 +1410,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		'file_count': file_count,
 		'mode_process_counts': mode_process_counts,
 		'failedOps': failedOps,
+		'report_errors': report_errors,
 	}
 
 MODE_ALIASES = {
@@ -1439,7 +1467,7 @@ def _finalize_tuning_run(options, tl, process_count, simultaneous_write_count=No
 		kwargs = simultaneous_session or {}
 		result = run_iotest(options.replace(process_count=process_count), tl=tl,
 			simultaneous_write_count=simultaneous_write_count, **kwargs)
-		if total_failed_ops(result):
+		if total_failed_ops(result) or result['report_errors']:
 			sys.exit(1)
 
 def tune_single_role(options, tl, role, target_bps):
@@ -1801,16 +1829,25 @@ def positive_int(value):
 		raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
 	return number
 
+def size_arg(value):
+	try:
+		number = parse_size_arg(value, unitless_as_mb=True)
+	except (ValueError, OverflowError):
+		raise argparse.ArgumentTypeError(f"invalid size value: {value!r}")
+	if number < 1:
+		raise argparse.ArgumentTypeError(f"must be at least 1 byte, got {value}")
+	return number
+
 def climain():
 	default_file_size_str = '30'
 	default_file_count = 50
 	default_process_count = 36
 
 	parser = argparse.ArgumentParser(description="Test total disk bandwidth. Default mode is write (w). Comprehensive mode: write -> move -> stat -> read")
-	parser.add_argument("-fs","--file_size", type=str, help="File size (default:30), defaults to mb, can specify in t(b),g(b),m(b),k(b),b", default=None)
+	parser.add_argument("-fs","--file_size", type=size_arg, help="File size (default:30), defaults to mb, can specify in t(b),g(b),m(b),k(b),b", default=None)
 	parser.add_argument("-fc","--file_count", type=positive_int, help="Number of files to create and read per process (default:50)",default=None)
 	parser.add_argument("-t",'-pc',"--process_count", type=positive_int, help="Number of processes to run concurrently (default:36)", default=None)
-	parser.add_argument("-ts","--total_size", type=str, help="Total size target. If -fs/-fc/-pc is omitted, auto-calculate one missing arg to fit this total size.")
+	parser.add_argument("-ts","--total_size", type=size_arg, help="Total size target. If -fs/-fc/-pc is omitted, auto-calculate one missing arg to fit this total size.")
 	parser.add_argument('-d',"--directory", action='append', type=str, help="Directory to put the files in. Repeat -d to round-robin workers across directories (default:<pwd>)", default=None)
 	parser.add_argument('-ld',"--log_directory", type=str, help="Directory to put the log files in (default:/var/log/)", default='/var/log/')
 	parser.add_argument("mode", nargs='*', type=str, help="""The mode the script will operate in (default: write / w).
@@ -1831,9 +1868,9 @@ def climain():
 	parser.add_argument('-addr',"--message_end_point_address", type=str, help="The end point address of the message")
 	parser.add_argument('--threshold_to_report_anomaly', type=float, help="The threshold to report if 1 percent high is higher then 1 percent low * <threshold_to_report_anomaly>",default=0)
 	parser.add_argument('-bt',"--benchmark_time", type=int, help="The time in seconds to run the benchmark for file generation speed",default=5)
-	parser.add_argument("-wtpt", "--write_target_throughput", type=str,
+	parser.add_argument("-wtpt", "--write_target_throughput", type=size_arg,
 		help="Target sync write throughput (e.g. 500m, 2g). Auto-tunes the first write pass.")
-	parser.add_argument("-rtpt", "--read_target_throughput", type=str,
+	parser.add_argument("-rtpt", "--read_target_throughput", type=size_arg,
 		help="Target sync read throughput (e.g. 500m, 2g). Auto-tunes the first read pass.")
 	parser.add_argument("-V","--version", action="version", version=f"%(prog)s {version} @ {COMMIT_DATE} with teeLogger {Tee_Logger.version} {' and numpy ' if numpy_available else ''} by pan@zopyr.us")
 	args = parser.parse_args()
@@ -1854,16 +1891,12 @@ def climain():
 	file_count_specified = args.file_count is not None
 	process_count_specified = args.process_count is not None
 
-	args.file_size = parse_size_arg(args.file_size if file_size_specified else default_file_size_str, unitless_as_mb=True)
-	if args.file_size < 1:
-		parser.error("argument -fs/--file_size: must be at least 1 byte")
+	args.file_size = args.file_size if file_size_specified else parse_size_arg(default_file_size_str)
 	args.file_count = args.file_count if file_count_specified else default_file_count
 	args.process_count = args.process_count if process_count_specified else default_process_count
 
 	if args.total_size is not None:
-		total_size = parse_size_arg(args.total_size, unitless_as_mb=True)
-		if total_size <= 0:
-			raise ValueError("total_size must be greater than 0")
+		total_size = args.total_size
 		if file_size_specified and file_count_specified and process_count_specified:
 			tl.teelog("Warning | iotest: -ts/--total_size is ignored because -fs, -fc, and -pc/-t are all explicitly set.", level='warning')
 		else:
@@ -1891,16 +1924,12 @@ def climain():
 	read_target = None
 	if args.write_target_throughput is not None:
 		if not supports_write_throughput_tuning(modes):
-			raise ValueError("-wtpt/--write_target_throughput requires a mode with a write pass (write, rw, comprehensive, simultaneous, etc.)")
-		write_target = parse_size_arg(args.write_target_throughput, unitless_as_mb=True)
-		if write_target <= 0:
-			raise ValueError("write_target_throughput must be greater than 0")
+			parser.error("-wtpt/--write_target_throughput requires a mode with a write pass (write, rw, comprehensive, simultaneous, etc.)")
+		write_target = args.write_target_throughput
 	if args.read_target_throughput is not None:
 		if not supports_read_throughput_tuning(modes):
-			raise ValueError("-rtpt/--read_target_throughput requires a mode with a read pass (read, rw, comprehensive, simultaneous, etc.)")
-		read_target = parse_size_arg(args.read_target_throughput, unitless_as_mb=True)
-		if read_target <= 0:
-			raise ValueError("read_target_throughput must be greater than 0")
+			parser.error("-rtpt/--read_target_throughput requires a mode with a read pass (read, rw, comprehensive, simultaneous, etc.)")
+		read_target = args.read_target_throughput
 	throughput_tuning = write_target is not None or read_target is not None
 	# without -d, args.directory is None and RunOptions uses the current directory
 	options = RunOptions(file_size=args.file_size, file_count=args.file_count, process_count=args.process_count,
@@ -1929,7 +1958,7 @@ def climain():
 		hint = leftover_hint(options.directories, sorted(worker_runs), options.file_count)
 		if hint:
 			tl.teeprint(hint)
-	if result is not None and total_failed_ops(result):
+	if result is not None and (total_failed_ops(result) or result['report_errors']):
 		sys.exit(1)
 	
 if __name__ == "__main__":
