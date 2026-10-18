@@ -83,7 +83,8 @@ def test_cli_exits_nonzero_when_ops_fail(tmp_path):
         ["-fs", "1k", "-fc", "1", "-pc", "1", "-d", str(work), "-nl", "-nr", "-z", "-bt", "1", "write"]
     )
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert str(blocker) in proc.stdout
+    # the OSError names the path by its repr, which doubles the backslashes of a Windows path
+    assert repr(str(blocker)) in proc.stdout
 
 
 def test_cli_total_size_fills_file_count(tmp_path):

@@ -51,7 +51,8 @@ def test_long_directories_still_write_result_files(run_main, rec_tl, tmp_path):
 
 def test_short_directory_keeps_todays_name(run_main, rec_tl, work_dir):
     run_main(["write"], tl=rec_tl, no_report=False)
-    dir_part = str(work_dir).replace("/", "-").replace("--", "-")
+    # the same separator rule iotest applies, so Windows paths (C:\...) match too
+    dir_part = str(work_dir).replace("/", "-").replace("\\", "-").replace(":", "-").replace("--", "-").replace(" ", "_")
     expected = "iotest_write_%s_fs=1024_fc=1_pc=1_rec_tl_run" % dir_part
     assert (work_dir / (expected + ".csv")).exists()
     assert (work_dir / (expected + "_report.txt")).exists()

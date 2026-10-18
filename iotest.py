@@ -999,8 +999,7 @@ def run_simultaneous_layout(file_count, file_size, directories, run_id, layout_w
 		counter_str = worker_counter_name(counter, counter_padding_process_count)
 		p = Process(target=layout_read_worker, args=(file_count, file_size, assigned_directory, run_id, counter_str, quiet, zeros, unique, block_size, verify))
 		layout_processes.append(p)
-	for p in layout_processes:
-		p.start()
+	start_processes(layout_processes)
 	for p in layout_processes:
 		p.join()
 	tl.teeprint(f"Layout pass complete in {time.perf_counter() - layout_start:.4f} s")
@@ -1080,6 +1079,14 @@ def record_pass_meta(late_starts, sync_estimated, key, late, estimated):
 def warn_late_starts(tl, mode, late, process_count):
 	if late:
 		tl.teelog(f"{len(late)} of {process_count} workers started late in {mode} mode, up to {max(late):.4f} s late; sync figures include the delay.", level='warning')
+
+def start_processes(processes):
+	# POSIX multiprocessing flushes stdout before starting a child, Windows does not: without this, piped
+	# output there shows the workers' lines ahead of what this process printed before starting them
+	sys.stdout.flush()
+	sys.stderr.flush()
+	for p in processes:
+		p.start()
 
 def dead_worker_errors(processes, file_count):
 	# a worker hands its results over only at the very end, so one that dies
@@ -1592,8 +1599,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				p = Process(target=benchmarkGenSpeed, args=(buffer_size, file_count,zeros,results,effective_benchmark_time))
 				processes.append(p)
 			genStartTime = time.perf_counter()
-			for p in processes:
-				p.start()
+			start_processes(processes)
 			for p in processes:
 				p.join()
 			processes.clear()
@@ -1669,8 +1675,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 						p = Process(target=simultaneous_role_worker, args=('read', file_count, file_size, assigned_directory, run_id, counter_str, read_results, quiet, zeros, thread_start_time, unique, read_late, pass_timeline, block_size, verify))
 						read_processes.append(p)
 					totalStartTime = thread_start_time
-					for p in write_processes + read_processes:
-						p.start()
+					start_processes(write_processes + read_processes)
 					for p in write_processes:
 						p.join()
 					write_sync_time = time.perf_counter() - totalStartTime
@@ -1707,8 +1712,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, read_recreates, late, json_to_stdout, pass_timeline, block_size, verify))
 				processes.append(p)
 			totalStartTime = thread_start_time
-			for p in processes:
-				p.start()
+			start_processes(processes)
 			for p in processes:
 				p.join()
 			totalEndTime =  time.perf_counter() - totalStartTime

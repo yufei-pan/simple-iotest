@@ -9,12 +9,17 @@ def block_with_dir(path):
     return path
 
 
+def in_error(path):
+    # an OSError names the path by its repr, which doubles the backslashes of a Windows path
+    return repr(str(path))
+
+
 @pytest.mark.parametrize("helper", ["create_file", "read_file"])
 def test_data_helpers_return_error_text_on_failure(iotest_mod, tmp_path, helper):
     blocker = block_with_dir(tmp_path / "f.bin")
     op = iotest_mod.op_time(getattr(iotest_mod, helper)(str(blocker), b"\x00" * 64, 64, quiet=True))
     assert isinstance(op, str)
-    assert str(blocker) in op
+    assert in_error(blocker) in op
 
 
 def test_metadata_helpers_return_error_text_on_failure(iotest_mod, tmp_path):
@@ -25,7 +30,7 @@ def test_metadata_helpers_return_error_text_on_failure(iotest_mod, tmp_path):
     ):
         op = iotest_mod.op_time(result)
         assert isinstance(op, str)
-        assert str(missing) in op
+        assert in_error(missing) in op
     # a regular file where index_file wants to create its directory
     (tmp_path / "x.bin.index").write_bytes(b"")
     op = iotest_mod.op_time(iotest_mod.index_file(str(tmp_path / "x.bin"), quiet=True))
@@ -42,7 +47,7 @@ def test_failed_write_is_counted_not_timed(run_main, work_dir, rec_tl):
     assert times[0] < 60
     errors = result["failedOps"]["write"]
     assert len(errors) == 1
-    assert str(blocker) in errors[0]
+    assert in_error(blocker) in errors[0]
     # only the one successful 1 KiB write counts toward the reported size
     size_line = next(line for line in "\n".join(rec_tl.printed).splitlines() if line.startswith("Total write size"))
     assert size_line.endswith("1.00 KiB")
@@ -53,7 +58,7 @@ def test_all_ops_failed_reports_first_error_without_crashing(run_main, work_dir,
     result = run_main(["write"], tl=rec_tl)
     assert result["outResults"]["write"] == []
     assert len(result["failedOps"]["write"]) == 1
-    assert str(blocker) in "\n".join(rec_tl.printed)
+    assert in_error(blocker) in "\n".join(rec_tl.printed)
 
 
 def test_comprehensive_failures_stay_on_their_own_op(run_main, work_dir):
