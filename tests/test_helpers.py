@@ -1,5 +1,7 @@
+import importlib.util
 import os
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -52,6 +54,62 @@ def test_normalize_directories(iotest_mod, work_dir):
     assert iotest_mod.normalize_directories(str(work_dir)) == [str(work_dir)]
     assert iotest_mod.normalize_directories([str(work_dir), "b"]) == [str(work_dir), "b"]
     assert iotest_mod.normalize_directories(None) == [os.getcwd()]
+
+
+def run_options(iotest_mod, **kwargs):
+    kwargs.setdefault("file_size", 1024)
+    kwargs.setdefault("file_count", 1)
+    kwargs.setdefault("process_count", 1)
+    kwargs.setdefault("modes", ["write"])
+    return iotest_mod.RunOptions(**kwargs)
+
+
+def test_run_options_replace_returns_a_new_object(iotest_mod, work_dir):
+    options = run_options(iotest_mod, process_count=2, directories=str(work_dir))
+    changed = options.replace(process_count=4, quiet=False)
+    assert changed is not options
+    assert (changed.process_count, changed.quiet) == (4, False)
+    assert (options.process_count, options.quiet) == (2, True)
+    assert changed.directories == options.directories == [str(work_dir)]
+
+
+def test_run_options_rejects_unknown_options(iotest_mod):
+    with pytest.raises(TypeError):
+        run_options(iotest_mod, benchmarkTime=5)
+    with pytest.raises(TypeError):
+        run_options(iotest_mod).replace(benchmarkTime=5)
+    # keyword arguments only
+    with pytest.raises(TypeError):
+        iotest_mod.RunOptions(1024, 1, 1, ["write"])
+
+
+def test_run_options_normalizes_directories(iotest_mod, work_dir):
+    assert run_options(iotest_mod, directories=str(work_dir)).directories == [str(work_dir)]
+    assert run_options(iotest_mod, directories=None).directories == [os.getcwd()]
+    assert run_options(iotest_mod).directories == [os.getcwd()]
+    assert run_options(iotest_mod, directories=(str(work_dir), "b")).directories == [str(work_dir), "b"]
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    [("6.100", True), ("6.9", False), ("7.0", True), ("6.34", True), ("6.34.1", True)],
+)
+def test_version_at_least_compares_integer_parts(iotest_mod, version, expected):
+    assert iotest_mod.version_at_least(version, "6.34") is expected
+
+
+@pytest.mark.parametrize("tee_version,used", [("6.100", True), ("6.9", False), ("dev", False)])
+def test_tee_logger_version_gate(monkeypatch, tee_version, used):
+    # an old or unparseable Tee_Logger falls back to the inline logger
+    fake = types.ModuleType("Tee_Logger")
+    fake.version = tee_version
+    monkeypatch.setitem(sys.modules, "Tee_Logger", fake)
+    spec = importlib.util.spec_from_file_location("iotest_gate_check", iotest_module.__file__)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert (module.Tee_Logger is fake) is used
+    if not used:
+        assert module.Tee_Logger.version == "0.1 inline"
 
 
 def test_addToDicWithoutOverwrite(iotest_mod):
@@ -225,3 +283,10 @@ def test_worker_log_quiet_suppresses(iotest_mod, capsys):
     assert capsys.readouterr().out == ""
     iotest_mod.worker_log("visible", quiet=False)
     assert "visible" in capsys.readouterr().out
+
+
+def test_worker_color_log_wraps_the_message_in_the_color(iotest_mod, capsys):
+    iotest_mod.worker_color_log((1, 2, 3), "Worker 0 finished.")
+    assert capsys.readouterr().out == "\033[38;2;1;2;3mWorker 0 finished.\033[0m\n"
+    iotest_mod.worker_color_log((1, 2, 3), "silenced", quiet=True)
+    assert capsys.readouterr().out == ""

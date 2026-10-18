@@ -99,20 +99,24 @@ def test_short_report_mentions_failures(run_main, work_dir, webhook, blocked, fi
 
 def test_tuning_attempt_with_failures_exits(iotest_mod, work_dir, rec_tl, tiny):
     block_with_dir(work_dir / "0" / "temp_1.bin")
+    options = iotest_mod.RunOptions(
+        file_size=tiny["file_size"], file_count=1, process_count=1, directories=str(work_dir),
+        modes=["write"], quiet=True, zeros=True, stealth=False, threshold_to_report_anomaly=0,
+        benchmark_time=tiny["benchmarkTime"])
     with pytest.raises(SystemExit) as ei:
-        iotest_mod._run_tuning_main(
-            tiny["file_size"], 1, 1, str(work_dir), ["write"], True, True, rec_tl,
-            False, 0, tiny["benchmarkTime"])
+        iotest_mod._run_tuning_main(options, rec_tl, 1)
     assert ei.value.code == 1
 
 
 def test_final_tuning_run_with_failures_exits(iotest_mod, work_dir, rec_tl, tiny):
     block_with_dir(work_dir / "0" / "temp_1.bin")
+    # no_report=False is what makes the final run happen at all
+    options = iotest_mod.RunOptions(
+        file_size=tiny["file_size"], file_count=1, process_count=1, directories=str(work_dir),
+        modes=["write"], quiet=True, zeros=True, stealth=False, message_end_point_address=None,
+        no_report=False, threshold_to_report_anomaly=0, benchmark_time=tiny["benchmarkTime"])
     with pytest.raises(SystemExit) as ei:
-        # no_report=False is what makes the final run happen at all
-        iotest_mod._finalize_tuning_run(
-            tiny["file_size"], 1, 1, str(work_dir), ["write"], True, True, rec_tl,
-            False, None, False, 0, tiny["benchmarkTime"])
+        iotest_mod._finalize_tuning_run(options, rec_tl, 1)
     assert ei.value.code == 1
 
 

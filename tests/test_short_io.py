@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 # Linux caps a single read()/write() at 2 GiB - 4 KiB; these fakes reproduce
 # that partial-transfer behaviour at a size a test can afford.
 REAL_WRITE = os.write
@@ -102,3 +104,20 @@ def test_each_syscall_is_capped_at_max_io_chunk(iotest_mod, tmp_path, monkeypatc
     iotest_mod.read_file(str(target), content, len(content), quiet=True)
     assert target.read_bytes() == content
     assert requested == [1024, 1024, 452, 1024, 1024, 452]
+
+
+@pytest.mark.parametrize("call,op", [("posix_fadvise", "write"), ("writev", "write"), ("readv", "read")])
+def test_ctrl_c_during_io_is_not_swallowed(iotest_mod, tmp_path, monkeypatch, call, op):
+    # the posix_fadvise warning and the f.write / f.readinto fallbacks catch only OSError
+    if not hasattr(os, call):
+        pytest.skip(f"no os.{call} here")
+    target = tmp_path / "f.bin"
+    target.write_bytes(b"\x01" * 64)
+
+    def interrupted(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(iotest_mod.os, call, interrupted)
+    helper = iotest_mod.create_file if op == "write" else iotest_mod.read_file
+    with pytest.raises(KeyboardInterrupt):
+        helper(str(target), b"\x01" * 64, 64, quiet=True)

@@ -46,8 +46,9 @@ def test_zeros_files_stay_all_zero_by_default(run_main, work_dir):
 
 def test_unique_reaches_tuning_runs(iotest_mod, work_dir, rec_tl, tiny):
     # pc=1 with a 1 B/s target: one tuning attempt, accepted as best effort
-    iotest_mod.tune_for_targets(8192, 2, 1, str(work_dir), ["write"], True, False, rec_tl,
-        1, None, no_report=True, benchmarkTime=tiny["benchmarkTime"], unique=True)
+    options = iotest_mod.RunOptions(file_size=8192, file_count=2, process_count=1, directories=str(work_dir),
+        modes=["write"], quiet=True, zeros=False, no_report=True, benchmark_time=tiny["benchmarkTime"], unique=True)
+    iotest_mod.tune_for_targets(options, rec_tl, 1, None)
     first, second = worker_files(work_dir)
     assert blocks(first).isdisjoint(blocks(second))
 

@@ -103,8 +103,9 @@ def test_leftover_hint_counts_only_the_given_runs(iotest_mod, work_dir):
 
 
 def test_cleanup_reaches_tuning_runs(iotest_mod, work_dir, rec_tl, tiny):
-    iotest_mod.tune_for_targets(1024, 2, 1, str(work_dir), ["write"], True, True, rec_tl,
-        1, None, no_report=True, benchmarkTime=tiny["benchmarkTime"], cleanup=True)
+    options = iotest_mod.RunOptions(file_size=1024, file_count=2, process_count=1, directories=str(work_dir),
+        modes=["write"], quiet=True, zeros=True, no_report=True, benchmark_time=tiny["benchmarkTime"], cleanup=True)
+    iotest_mod.tune_for_targets(options, rec_tl, 1, None)
     assert temp_files(work_dir) == []
 
 
@@ -137,9 +138,10 @@ def test_simultaneous_tuning_checks_space_before_its_layout(iotest_mod, work_dir
     layouts = []
     monkeypatch.setattr(iotest_mod, "run_simultaneous_layout", lambda *a, **k: layouts.append(a))
     fake_free(iotest_mod, monkeypatch, 1000)
+    options = iotest_mod.RunOptions(file_size=1024, file_count=2, process_count=2, directories=str(work_dir),
+        modes=["simultaneous"], quiet=True, zeros=True, no_report=True, benchmark_time=tiny["benchmarkTime"])
     with pytest.raises(SystemExit) as ei:
-        iotest_mod.tune_for_targets(1024, 2, 2, str(work_dir), ["simultaneous"], True, True, rec_tl,
-            1, None, no_report=True, benchmarkTime=tiny["benchmarkTime"])
+        iotest_mod.tune_for_targets(options, rec_tl, 1, None)
     assert ei.value.code == 1
     assert layouts == []
 
@@ -154,8 +156,9 @@ def test_tuning_cleans_up_only_after_the_last_attempt(run_main, iotest_mod, work
     monkeypatch.setattr(iotest_mod, "cleanup_worker_files",
         lambda *a, **k: events.append("cleanup") or real_cleanup(*a, **k))
     # a 1 B/s read target: pc 2 is above it, so pc drops to 1 and the second attempt is accepted
-    iotest_mod.tune_for_targets(1024, 2, 2, str(work_dir), ["read"], True, True, rec_tl,
-        None, 1, no_report=True, benchmarkTime=tiny["benchmarkTime"], cleanup=True)
+    options = iotest_mod.RunOptions(file_size=1024, file_count=2, process_count=2, directories=str(work_dir),
+        modes=["read"], quiet=True, zeros=True, no_report=True, benchmark_time=tiny["benchmarkTime"], cleanup=True)
+    iotest_mod.tune_for_targets(options, rec_tl, None, 1)
     assert events.count("attempt") == 2
     last_attempt = max(i for i, e in enumerate(events) if e == "attempt")
     assert "cleanup" not in events[:last_attempt]
@@ -168,8 +171,9 @@ def test_tuning_cleanup_keeps_files_of_other_runs(iotest_mod, work_dir, rec_tl, 
     for _, _, path in iotest_mod.worker_files([str(work_dir)], 9, 2):
         Path(path).parent.mkdir(exist_ok=True)
         Path(path).write_bytes(b"x" * 1024)
-    iotest_mod.tune_for_targets(1024, 2, 12, str(work_dir), ["write"], True, True, rec_tl,
-        1, None, no_report=True, benchmarkTime=tiny["benchmarkTime"], cleanup=True)
+    options = iotest_mod.RunOptions(file_size=1024, file_count=2, process_count=12, directories=str(work_dir),
+        modes=["write"], quiet=True, zeros=True, no_report=True, benchmark_time=tiny["benchmarkTime"], cleanup=True)
+    iotest_mod.tune_for_targets(options, rec_tl, 1, None)
     assert temp_files(work_dir) == [f"{c}/temp_{i}.bin" for c in range(1, 9) for i in (1, 2)]
 
 
@@ -270,9 +274,10 @@ def test_tuning_cleanup_covers_an_attempt_that_did_not_finish(iotest_mod, work_d
     def broken_report(*a, **k):
         raise RuntimeError("report failed")
     monkeypatch.setattr(iotest_mod, "calc_iops", broken_report)
+    options = iotest_mod.RunOptions(file_size=1024, file_count=2, process_count=2, directories=str(work_dir),
+        modes=["write"], quiet=True, zeros=True, no_report=True, benchmark_time=tiny["benchmarkTime"], cleanup=True)
     with pytest.raises(RuntimeError):
-        iotest_mod.tune_for_targets(1024, 2, 2, str(work_dir), ["write"], True, True, rec_tl,
-            1, None, no_report=True, benchmarkTime=tiny["benchmarkTime"], cleanup=True)
+        iotest_mod.tune_for_targets(options, rec_tl, 1, None)
     assert temp_files(work_dir) == []
 
 
@@ -281,8 +286,9 @@ def test_tuning_warns_about_snapshots_once_before_it_starts(run_main, iotest_mod
     lines = [ROOT, mountinfo_line(os.path.realpath(work_dir), "btrfs", "/dev/sdb")]
     monkeypatch.setattr(iotest_mod, "read_mountinfo", lambda: lines)
     fake_free(iotest_mod, monkeypatch, 0)
-    iotest_mod.tune_for_targets(1024, 1, 1, str(work_dir), ["write"], True, True, rec_tl,
-        1, None, no_report=True, benchmarkTime=tiny["benchmarkTime"])
+    options = iotest_mod.RunOptions(file_size=1024, file_count=1, process_count=1, directories=str(work_dir),
+        modes=["write"], quiet=True, zeros=True, no_report=True, benchmark_time=tiny["benchmarkTime"])
+    iotest_mod.tune_for_targets(options, rec_tl, 1, None)
     assert sum("snapshot" in m for m in rec_tl.messages) == 1
 
 

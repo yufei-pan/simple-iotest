@@ -10,49 +10,61 @@ def assert_finite_positive(x):
 
 
 def test_tuning_attempt_write_bandwidth(iotest_mod, work_dir, make_tl, tiny):
-    result = iotest_mod._run_tuning_main(
-        tiny["file_size"],
-        tiny["file_count"],
-        2,
-        str(work_dir),
-        ["write"],
-        tiny["quiet"],
-        tiny["zeros"],
-        make_tl(),
-        True,  # stealth
-        0,
-        tiny["benchmarkTime"],
+    options = iotest_mod.RunOptions(
+        file_size=tiny["file_size"],
+        file_count=tiny["file_count"],
+        process_count=2,
+        directories=str(work_dir),
+        modes=["write"],
+        quiet=tiny["quiet"],
+        zeros=tiny["zeros"],
+        stealth=True,
+        threshold_to_report_anomaly=0,
+        benchmark_time=tiny["benchmarkTime"],
     )
+    result = iotest_mod._run_tuning_main(options, make_tl(), 2)
     assert_finite_positive(iotest_mod.measure_role_bandwidth(result, "write"))
+
+
+def test_tuning_attempt_reports_nothing_and_leaves_the_options_unchanged(iotest_mod, work_dir, rec_tl):
+    # tuning reuses one options object for every attempt and for the final reported run
+    options = iotest_mod.RunOptions(
+        file_size=1024, file_count=1, process_count=1, directories=str(work_dir), modes=["write"],
+        zeros=True, no_report=False, message_end_point_address="http://127.0.0.1:9/unused",
+        benchmark_time=1,
+    )
+    before = dict(vars(options))
+    iotest_mod.run_iotest(options, tl=rec_tl, tuning_attempt=True)
+    assert vars(options) == before
+    assert list(work_dir.glob("iotest_*")) == []
+    assert not any("short report" in m for m in rec_tl.messages)
 
 
 def test_tune_single_role_low_target_decreases_pc(iotest_mod, work_dir, make_tl, tiny, monkeypatch):
     pcs = []
     real = iotest_mod._run_tuning_main
 
-    def spy(file_size, file_count, process_count, *args, **kwargs):
+    def spy(options, tl, process_count, *args, **kwargs):
         pcs.append(process_count)
-        return real(file_size, file_count, process_count, *args, **kwargs)
+        return real(options, tl, process_count, *args, **kwargs)
 
     monkeypatch.setattr(iotest_mod, "_run_tuning_main", spy)
     # Avoid final full re-run cost/noise
     monkeypatch.setattr(iotest_mod, "_finalize_tuning_run", lambda *a, **k: None)
 
-    rc = iotest_mod.tune_single_role(
-        tiny["file_size"],
-        tiny["file_count"],
-        4,
-        str(work_dir),
-        ["write"],
-        tiny["quiet"],
-        tiny["zeros"],
-        make_tl(),
-        "write",
-        1,  # absurdly low B/s target
+    options = iotest_mod.RunOptions(
+        file_size=tiny["file_size"],
+        file_count=tiny["file_count"],
+        process_count=4,
+        directories=str(work_dir),
+        modes=["write"],
+        quiet=tiny["quiet"],
+        zeros=tiny["zeros"],
         stealth=True,
         no_report=True,
-        benchmarkTime=tiny["benchmarkTime"],
+        benchmark_time=tiny["benchmarkTime"],
     )
+    rc = iotest_mod.tune_single_role(options, make_tl(), "write", 1)  # absurdly low B/s target
     assert rc == 0
     assert pcs, "expected at least one tuning attempt"
     # Either decreased across attempts, or best-effort accept at pc=1
@@ -64,22 +76,20 @@ def test_tune_single_role_low_target_decreases_pc(iotest_mod, work_dir, make_tl,
 
 
 def test_tune_single_role_high_target_exits(iotest_mod, work_dir, make_tl, tiny):
+    options = iotest_mod.RunOptions(
+        file_size=tiny["file_size"],
+        file_count=tiny["file_count"],
+        process_count=2,
+        directories=str(work_dir),
+        modes=["write"],
+        quiet=tiny["quiet"],
+        zeros=tiny["zeros"],
+        stealth=True,
+        no_report=True,
+        benchmark_time=tiny["benchmarkTime"],
+    )
     with pytest.raises(SystemExit) as ei:
-        iotest_mod.tune_single_role(
-            tiny["file_size"],
-            tiny["file_count"],
-            2,
-            str(work_dir),
-            ["write"],
-            tiny["quiet"],
-            tiny["zeros"],
-            make_tl(),
-            "write",
-            10**15,
-            stealth=True,
-            no_report=True,
-            benchmarkTime=tiny["benchmarkTime"],
-        )
+        iotest_mod.tune_single_role(options, make_tl(), "write", 10**15)
     assert ei.value.code == 1
 
 
@@ -99,42 +109,38 @@ def test_tune_for_targets_read_path(iotest_mod, work_dir, make_tl, tiny, monkeyp
     )
     monkeypatch.setattr(iotest_mod, "_finalize_tuning_run", lambda *a, **k: None)
     # Drive through public entry with low read target (decrease-only / best-effort)
-    iotest_mod.tune_for_targets(
-        tiny["file_size"],
-        tiny["file_count"],
-        2,
-        str(work_dir),
-        ["read"],
-        tiny["quiet"],
-        tiny["zeros"],
-        make_tl(),
-        None,
-        1,
+    options = iotest_mod.RunOptions(
+        file_size=tiny["file_size"],
+        file_count=tiny["file_count"],
+        process_count=2,
+        directories=str(work_dir),
+        modes=["read"],
+        quiet=tiny["quiet"],
+        zeros=tiny["zeros"],
         stealth=True,
         no_report=True,
-        benchmarkTime=tiny["benchmarkTime"],
+        benchmark_time=tiny["benchmarkTime"],
     )
+    iotest_mod.tune_for_targets(options, make_tl(), None, 1)
 
 
 def test_tune_simultaneous_dual_target_low(iotest_mod, work_dir, make_tl, tiny, monkeypatch):
     monkeypatch.setattr(iotest_mod, "_finalize_tuning_run", lambda *a, **k: None)
     # May SystemExit if either role cannot meet; low targets should succeed or accept pc=1 path
+    options = iotest_mod.RunOptions(
+        file_size=tiny["file_size"],
+        file_count=tiny["file_count"],
+        process_count=4,
+        directories=str(work_dir),
+        modes=["simultaneous"],
+        quiet=tiny["quiet"],
+        zeros=tiny["zeros"],
+        stealth=True,
+        no_report=True,
+        benchmark_time=tiny["benchmarkTime"],
+    )
     try:
-        iotest_mod.tune_for_targets(
-            tiny["file_size"],
-            tiny["file_count"],
-            4,
-            str(work_dir),
-            ["simultaneous"],
-            tiny["quiet"],
-            tiny["zeros"],
-            make_tl(),
-            1,
-            1,
-            stealth=True,
-            no_report=True,
-            benchmarkTime=tiny["benchmarkTime"],
-        )
+        iotest_mod.tune_for_targets(options, make_tl(), 1, 1)
     except SystemExit as e:
         # Documented failure path if a role measures below target mid-tune
         assert e.code == 1
@@ -174,12 +180,13 @@ def _call_dual(iotest_mod, work_dir, rec_tl, write_target, read_target, **kw):
         tl=rec_tl,
     )
     defaults.update(kw)
-    return iotest_mod.tune_dual_role_shared_pc(
-        defaults["file_size"], defaults["file_count"], defaults["process_count"],
-        defaults["directory"], defaults["modes"], defaults["quiet"], defaults["zeros"],
-        defaults["tl"], write_target, read_target,
-        stealth=True, no_report=True, benchmarkTime=1,
+    options = iotest_mod.RunOptions(
+        file_size=defaults["file_size"], file_count=defaults["file_count"],
+        process_count=defaults["process_count"], directories=defaults["directory"],
+        modes=defaults["modes"], quiet=defaults["quiet"], zeros=defaults["zeros"],
+        stealth=True, no_report=True, benchmark_time=1,
     )
+    return iotest_mod.tune_dual_role_shared_pc(options, defaults["tl"], write_target, read_target)
 
 
 def test_dual_role_shared_pc_targets_met_finalizes(iotest_mod, work_dir, rec_tl, monkeypatch):
@@ -231,11 +238,12 @@ def test_dual_role_shared_pc_cannot_measure_exits(iotest_mod, work_dir, rec_tl, 
 
 
 def _call_simul(iotest_mod, work_dir, rec_tl, write_target, read_target, process_count=2):
-    return iotest_mod.tune_simultaneous(
-        1024, 1, process_count, [str(work_dir)], ["simultaneous"],
-        True, True, rec_tl, write_target, read_target,
-        stealth=True, no_report=True, benchmarkTime=1,
+    options = iotest_mod.RunOptions(
+        file_size=1024, file_count=1, process_count=process_count, directories=[str(work_dir)],
+        modes=["simultaneous"], quiet=True, zeros=True,
+        stealth=True, no_report=True, benchmark_time=1,
     )
+    return iotest_mod.tune_simultaneous(options, rec_tl, write_target, read_target)
 
 
 def _stub_simul(iotest_mod, monkeypatch, measure, process_count=2):
