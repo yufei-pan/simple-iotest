@@ -4,7 +4,7 @@ Ever feel like fio is too complicated and too optimized? Well, simple-iotest cov
 
 Using the most simple non-optimized write() or writev() with fallback to python f.write() (just like your code!) to test file system io performance.
 
-Warning: if using big file sizes, make sure you have enough memory to hold all these bits!
+Warning: if using big file sizes, make sure you have enough memory to hold all these bits! (Or use `-bs`: each worker then holds one block instead of a whole file.)
 
 Note:
 	Recommand to also install the package Tee_Logger to also log your test results to your /var/log/ ( configurable ) for future keeping.
@@ -31,6 +31,7 @@ Default mode is **write** (`w`) when no mode is specified.
 
 ### Common Options
 - `-fs, --file_size`: Size of the test files (default: 30 MiB; suffix `m`, `g`, etc. supported).  
+- `-bs, --block_size`: Writes and reads each file in calls of this size (same units as `-fs`), from one buffer of this size per worker instead of one the size of a file, so large files need little memory and small-I/O patterns can be tested. Default: unset, one call per file; a block size at least the file size is the same as unset. A short write or read is retried with the rest of its block, and a written file is synced once, after its last block. An operation is still one whole file: its time covers every block, and IOPS count files. Without `-u`, every block of a file is the same data, so deduplicating storage may store it once; with `-u`, each block is stamped with its place in the file just before it is written, inside the timed write (without `-bs` the whole file is stamped before the timer starts).  
 - `-fc, --file_count`: Number of files to process per worker (default: 50).  
 - `-pc, --process_count`: Number of worker processes (default: 36).  
 - `-wtpt, --write_target_throughput`: Target sync write throughput (e.g. `500m`, `2g`); auto-tunes the first write pass.  
@@ -74,7 +75,7 @@ iotest -fs 50m -fc 20 -pc 8 -d /tmp/iotest simultaneous
 Besides the per-mode CSV, every run that writes result files also writes `<name>_ops.csv`, one row per attempted operation, so you can see SSD cache exhaustion, throttling or stalls over time. Columns: `pass` (1-based index of the pass in this run; a simultaneous run is one pass), `mode` (the pass's mode), `op` (`write`, `read`, `move`, `stat` or `index`), `worker` (the worker's counter name, as used for its directory), `file_index` (1-based), `start_s` (seconds from the pass's common start time to the operation's start, 6 decimals; for a failed operation, when the attempt began), `duration_s` (6 decimals, empty for a failed operation) and `error` (empty on success, the error text on failure). Rows are sorted by pass, then `start_s`. Workers that died before reporting have no rows. `-nr` skips this file too.
 
 ### JSON summary
-`--json` is meant for collecting runs from many hosts (for example launched with `mssh`). Top level: `tool`, `version`, `host`, `started` (local time with UTC offset), `options` (`file_size`, `file_count`, `process_count` as requested, `directories`, `modes`, `zeros`, `unique`, `start_at`), `results`, `failed_ops` and `report_errors`. `results` has one entry per result key (`write`, `read`, `random_write`, ...), each with `ops`, `failed`, `first_error`, `process_count` (the count that ran, which the memory check can lower), `total_bytes`, `bytes_per_s_call`, `bytes_per_s_sync`, `io_time_pct`, `iops_call`, `iops_sync`, `latency_s` (`avg`, `median`, `p1`, `p99`, `p99_9`, `max`, in seconds; `null` when no op succeeded), `sync_estimated`, `late_workers` and `max_late_s`. Values that do not apply (bytes for `index`, for example) are `null`.
+`--json` is meant for collecting runs from many hosts (for example launched with `mssh`). Top level: `tool`, `version`, `host`, `started` (local time with UTC offset), `options` (`file_size`, `file_count`, `process_count` as requested, `directories`, `modes`, `zeros`, `unique`, `start_at`, `block_size` as requested or `null`), `results`, `failed_ops` and `report_errors`. `results` has one entry per result key (`write`, `read`, `random_write`, ...), each with `ops`, `failed`, `first_error`, `process_count` (the count that ran, which the memory check can lower), `total_bytes`, `bytes_per_s_call`, `bytes_per_s_sync`, `io_time_pct`, `iops_call`, `iops_sync`, `latency_s` (`avg`, `median`, `p1`, `p99`, `p99_9`, `max`, in seconds; `null` when no op succeeded), `sync_estimated`, `late_workers` and `max_late_s`. Values that do not apply (bytes for `index`, for example) are `null`.
 
 ### Multi-host runs
 `--start_at EPOCH` makes every host begin its first timed pass at the same wall-clock instant (seconds since the Unix epoch, e.g. `$(date -d '+1 min' +%s)`), so the storage sees the combined load. Compute the time once, locally, and pass it to every host:
@@ -97,10 +98,11 @@ Check the available arguments with `-h` or `--help` for more details.
 
 ```bash
 $ iotest -h
-usage: iotest [-h] [-fs FILE_SIZE] [-fc FILE_COUNT] [-t PROCESS_COUNT] [-ts TOTAL_SIZE] [-d DIRECTORY]
-              [-ld LOG_DIRECTORY] [-q] [-v] [-S] [-nl] [-nr] [-z] [-u] [-j PATH] [-cl] [-addr MESSAGE_END_POINT_ADDRESS]
-              [--threshold_to_report_anomaly THRESHOLD_TO_REPORT_ANOMALY] [-bt BENCHMARK_TIME]
-              [-wtpt WRITE_TARGET_THROUGHPUT] [-rtpt READ_TARGET_THROUGHPUT] [--start_at EPOCH] [-V]
+usage: iotest [-h] [-fs FILE_SIZE] [-bs BLOCK_SIZE] [-fc FILE_COUNT] [-t PROCESS_COUNT] [-ts TOTAL_SIZE]
+              [-d DIRECTORY] [-ld LOG_DIRECTORY] [-q] [-v] [-S] [-nl] [-nr] [-z] [-u] [-j PATH] [-cl]
+              [-addr MESSAGE_END_POINT_ADDRESS] [--threshold_to_report_anomaly THRESHOLD_TO_REPORT_ANOMALY]
+              [-bt BENCHMARK_TIME] [-wtpt WRITE_TARGET_THROUGHPUT] [-rtpt READ_TARGET_THROUGHPUT] [--start_at EPOCH]
+              [-V]
               [{read,write,random,index,benchmark,comprehensive,simultaneous,r,w,rw,wr,i,rwi,wri,c,b,s} ...]
 
 Test total disk bandwidth. Default mode is write (w). Comprehensive mode: write -> move -> stat -> read
@@ -117,6 +119,9 @@ options:
   -h, --help            show this help message and exit
   -fs, --file_size FILE_SIZE
                         File size (default:30), defaults to mb, can specify in t(b),g(b),m(b),k(b),b
+  -bs, --block_size BLOCK_SIZE
+                        Write and read each file in calls of this size from one buffer of this size per worker,
+                        instead of the whole file in one call (default). Same units as -fs
   -fc, --file_count FILE_COUNT
                         Number of files to create and read per process (default:50)
   -t, -pc, --process_count PROCESS_COUNT
