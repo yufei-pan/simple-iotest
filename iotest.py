@@ -1095,8 +1095,8 @@ def summarize_key(times, failed, effective_pc, total_time, file_size, has_bytes)
 		'iops_call': None, 'iops_sync': None, 'latency_s': None}
 	if not times:
 		return stats
-	# sorted in place: the CSV file writes the same list afterwards
-	times.sort()
+	# a sorted copy: the CSV keeps the arrival order
+	times = sorted(times)
 	count = len(times)
 	stats['latency_s'] = {'avg': sum(times) / count, 'median': times[count // 2], 'p1': times[int(count * 0.01)],
 		'p99': times[int(count * 0.99)], 'p99_9': times[int(count * 0.999)], 'max': times[-1]}
@@ -1197,6 +1197,8 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=None,
 		simultaneous_run_id=None, simultaneous_skip_layout=False, simultaneous_skip_cleanup=False,
 		simultaneous_layout_workers=None, simultaneous_layout_process_count=None):
+	# read before the tuning override below: attempts must keep the digits off the JSON's stdout too
+	json_to_stdout = options.json_path == '-'
 	if tuning_attempt:
 		# an attempt only feeds the tuner: no report files, no short reports
 		options = options.replace(no_report=True, message_end_point_address=None, json_path=None)
@@ -1411,7 +1413,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			for counter in range(process_count):
 				assigned_directory = directories[counter % len(directories)]
 				counter = worker_counter_name(counter, process_count)
-				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, read_recreates, late, options.json_path == '-'))
+				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, read_recreates, late, json_to_stdout))
 				processes.append(p)
 			totalStartTime = thread_start_time
 			for p in processes:

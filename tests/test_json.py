@@ -124,3 +124,25 @@ def test_format_key_report_on_fixed_statistics(iotest_mod):
         "Note: sync figures are estimates: comprehensive mode splits the pass time across write/move/stat/read by their share of op time.",
         "-" * 80,
     ]
+
+
+def test_summarize_key_does_not_reorder_its_input(iotest_mod):
+    times = [0.3, 0.1, 0.2, 0.5, 0.4]
+    stats = iotest_mod.summarize_key(times, [], 1, 1.0, 1024, True)
+    assert times == [0.3, 0.1, 0.2, 0.5, 0.4]
+    assert stats["latency_s"]["median"] == 0.3 and stats["latency_s"]["max"] == 0.5
+
+
+def test_csv_column_matches_arrival_order_of_returned_results(run_main, rec_tl, work_dir):
+    result = run_main(["write"], tl=rec_tl, no_report=False, file_count=20)
+    times = result["outResults"]["write"]
+    csv_files = list(work_dir.glob("iotest_*.csv"))
+    assert len(csv_files) == 1
+    lines = csv_files[0].read_text().splitlines()
+    assert [float(v) for v in lines[1:]] == times
+
+
+def test_cli_tuning_with_json_stdout_and_stealth_is_only_json(tmp_path):
+    proc = cli(tmp_path, "-S", "-j", "-", "-wtpt", "1k")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(proc.stdout)["results"]["write"]["ops"] == 10
