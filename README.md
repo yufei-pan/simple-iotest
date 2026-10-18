@@ -42,6 +42,7 @@ Default mode is **write** (`w`) when no mode is specified.
 - `-cl, --cleanup`: Deletes the test files when the run ends. By default they are kept so a later `read` run can reuse them (the default settings leave about 53 GiB). Before writing, iotest checks free space per filesystem and refuses to start (exit 1) if the run would not fit.  
 - `-nl, --no_log`: Disables log file creation.  
 - `-nr, --no_report`: Disables result report creation.  
+- `-j, --json PATH`: Writes a JSON summary of the run to `PATH` after the text report, also with `-nr`. `-` prints it to stdout instead; with `-S`, stdout then carries only the JSON (worker progress digits go to stderr). With throughput tuning it describes the final run. A summary that cannot be written exits 1, like other result files.  
 
 ### Modes
 - `write` / `w`: Only file writes (default).  
@@ -69,6 +70,9 @@ iotest -fs 50m -fc 20 -pc 8 -d /tmp/iotest simultaneous
 - Page cache: after each write is synced, iotest drops the file's pages (`posix_fadvise(DONTNEED)`) and before each read it does the same, so results reflect the storage. On macOS, which has no `posix_fadvise`, `F_NOCACHE` is set on every test file instead. On Windows neither exists, so reads may be served from cache.
 - Late starts: workers wait for a common start time. If some reach it late (for example, a slow start under heavy load), the report adds a line such as `Late starts:  3 of 36 workers, up to 0.0412 s late (sync figures include the delay)` and a warning is logged, even without `-v`. The returned result also carries them as `late_starts`.
 
+### JSON summary
+`--json` is meant for collecting runs from many hosts (for example launched with `mssh`). Top level: `tool`, `version`, `host`, `started` (local time with UTC offset), `options` (`file_size`, `file_count`, `process_count` as requested, `directories`, `modes`, `zeros`, `unique`), `results`, `failed_ops` and `report_errors`. `results` has one entry per result key (`write`, `read`, `random_write`, ...), each with `ops`, `failed`, `first_error`, `process_count` (the count that ran, which the memory check can lower), `total_bytes`, `bytes_per_s_call`, `bytes_per_s_sync`, `io_time_pct`, `iops_call`, `iops_sync`, `latency_s` (`avg`, `median`, `p1`, `p99`, `p99_9`, `max`, in seconds; `null` when no op succeeded), `sync_estimated`, `late_workers` and `max_late_s`. Values that do not apply (bytes for `index`, for example) are `null`.
+
 ### Exit codes
 - `0`: the run completed and every operation succeeded.
 - `1`: at least one I/O operation failed (the report shows how many and the first error), the target does not have enough free space (nothing is written), throughput tuning could not reach its target, or a result file could not be written (the report is still printed).
@@ -79,7 +83,7 @@ Check the available arguments with `-h` or `--help` for more details.
 ```bash
 $ iotest -h
 usage: iotest [-h] [-fs FILE_SIZE] [-fc FILE_COUNT] [-t PROCESS_COUNT] [-ts TOTAL_SIZE] [-d DIRECTORY]
-              [-ld LOG_DIRECTORY] [-q] [-v] [-S] [-nl] [-nr] [-z] [-u] [-cl] [-addr MESSAGE_END_POINT_ADDRESS]
+              [-ld LOG_DIRECTORY] [-q] [-v] [-S] [-nl] [-nr] [-z] [-u] [-j PATH] [-cl] [-addr MESSAGE_END_POINT_ADDRESS]
               [--threshold_to_report_anomaly THRESHOLD_TO_REPORT_ANOMALY] [-bt BENCHMARK_TIME]
               [-wtpt WRITE_TARGET_THROUGHPUT] [-rtpt READ_TARGET_THROUGHPUT] [-V]
               [{read,write,random,index,benchmark,comprehensive,simultaneous,r,w,rw,wr,i,rwi,wri,c,b,s} ...]
@@ -120,6 +124,8 @@ options:
   -u, --unique_files    Stamp every 512-byte block with (file, block, worker) so no two blocks of the run are
                         identical. Use on storage that deduplicates (iotest warns when it detects some). Adds a few ms
                         per 30 MiB file to sync times.
+  -j, --json PATH       Write a JSON summary of the run to PATH after the text report. Use - for stdout (with -S,
+                        stdout then carries only the JSON)
   -cl, --cleanup        Delete the test files when the run ends (default: keep them, so a later read run can reuse
                         them)
   -addr, --message_end_point_address MESSAGE_END_POINT_ADDRESS

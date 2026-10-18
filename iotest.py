@@ -9,6 +9,7 @@ import os
 import random
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -496,7 +497,7 @@ def worker_color_log(color, msg, quiet=False):
 	r, g, b = color
 	worker_log(f'\033[38;2;{r};{g};{b}m{msg}\033[0m', quiet=quiet)
 
-def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False, late_starts=None):
+def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False, late_starts=None, progress_to_stderr=False):
 	local_results = []
 	log = functools.partial(worker_color_log, int_to_color(os.getpid()), quiet=quiet)
 	log(f'Worker {counter} scheduled to start at {thread_start_time-time.perf_counter():.4f} later in {mode} mode.')
@@ -524,7 +525,8 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 	for i in range(file_count):
 		# print a digit every 10% of the files
 		if i % reportInterval == 0 and quiet:
-				print(f'\r{i//reportInterval}',end='',flush=True)
+				# stderr when stdout carries the JSON summary
+				print(f'\r{i//reportInterval}',end='',flush=True,file=sys.stderr if progress_to_stderr else None)
 		file_name = worker_file_path(directory, counter, i, file_count)
 		if stamp_files:
 			stamp_unique(file_content, stamp_id, i)
@@ -805,7 +807,7 @@ class RunOptions:
 	# every option of one invocation; a new option is added here, with its default
 	def __init__(self, *, file_size, file_count, process_count, modes, directories=None,
 			quiet=True, zeros=False, stealth=False, message_end_point_address=None, no_report=False,
-			threshold_to_report_anomaly=0, benchmark_time=5, unique=False, cleanup=False):
+			threshold_to_report_anomaly=0, benchmark_time=5, unique=False, cleanup=False, json_path=None):
 		self.file_size = file_size
 		self.file_count = file_count
 		self.process_count = process_count
@@ -820,6 +822,7 @@ class RunOptions:
 		self.benchmark_time = benchmark_time
 		self.unique = unique
 		self.cleanup = cleanup
+		self.json_path = json_path
 
 	def replace(self, **changes):
 		values = dict(vars(self))
@@ -1084,13 +1087,107 @@ def write_report_file(path, write_content, tl, report_errors):
 		return False
 	return True
 
-def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None,unique=False,cleanup=False):
+def summarize_key(times, failed, effective_pc, total_time, file_size, has_bytes):
+	# raw numbers for one result key; the text report and the JSON are both built from this
+	stats = {'ops': len(times), 'failed': len(failed), 'first_error': str(failed[0]) if failed else None,
+		'process_count': effective_pc, 'total_bytes': file_size * len(times) if has_bytes else None,
+		'bytes_per_s_call': None, 'bytes_per_s_sync': None, 'io_time_pct': None,
+		'iops_call': None, 'iops_sync': None, 'latency_s': None}
+	if not times:
+		return stats
+	# sorted in place: the CSV file writes the same list afterwards
+	times.sort()
+	count = len(times)
+	stats['latency_s'] = {'avg': sum(times) / count, 'median': times[count // 2], 'p1': times[int(count * 0.01)],
+		'p99': times[int(count * 0.99)], 'p99_9': times[int(count * 0.999)], 'max': times[-1]}
+	stats['iops_call'], stats['iops_sync'] = calc_iops(times, total_time, effective_pc)
+	if has_bytes:
+		total_p_time = sum(times) / effective_pc
+		if total_p_time > 0:
+			stats['bytes_per_s_call'] = stats['total_bytes'] / total_p_time
+		if total_time and total_time > 0:
+			stats['bytes_per_s_sync'] = stats['total_bytes'] / total_time
+			stats['io_time_pct'] = total_p_time / total_time * 100
+	return stats
+
+def format_key_report(mode, stats, late, estimated, zeros, dedup_notes):
+	report = ["*"*80, f"Report for {mode} mode:"]
+	if zeros:
+		report.append("Warning! Using zeros for file content. Compressed filesystems will show optimistic results.")
+	report.extend(dedup_notes)
+	op_count = stats['ops'] + stats['failed']
+	if stats['failed']:
+		report.append(f"Failed {mode} ops:      \t{stats['failed']} of {op_count}, first error: {stats['first_error']}")
+	if late[0]:
+		report.append(f"Late starts:           \t{late[0]} of {stats['process_count']} workers, up to {late[1]:.4f} s late (sync figures include the delay)")
+	latency = stats['latency_s']
+	if latency is None:
+		report.append(f"No successful {mode} ops, skipping timing statistics.")
+		report.append("-"*80)
+		return report
+	if stats['total_bytes'] is not None:
+		call_bps = stats['bytes_per_s_call']
+		sync_bps = stats['bytes_per_s_sync']
+		pct = stats['io_time_pct']
+		report.append(f"Total {mode} size:      \t{format_bytes(stats['total_bytes'])}B")
+		report.append(f"{mode} bandwidth (call):\t{format_bytes(call_bps)}B/s" if call_bps is not None else f"{mode} bandwidth (call):\tN/A")
+		if call_bps is not None:
+			report.append(f"                       \t{format_bytes(call_bps * 8,use_1024_bytes=False)}bps")
+		report.append(f"{mode} bandwidth (sync):\t{format_bytes(sync_bps)}B/s" if sync_bps is not None else f"{mode} bandwidth (sync):\tN/A")
+		if sync_bps is not None:
+			report.append(f"                       \t{format_bytes(sync_bps * 8,use_1024_bytes=False)}bps")
+		report.append(f"IO time % (IO wait):   \t{pct:.2f}%" if pct is not None else "IO time % (IO wait):   \tN/A")
+	report.append(f"Total {mode} ops:       \t{stats['ops']}")
+	report.append(f"{mode} IOPS (call):     \t{format_iops(stats['iops_call'])}")
+	report.append(f"{mode} IOPS (sync):     \t{format_iops(stats['iops_sync'])}")
+	report.append(f"Average {mode} time:    \t{latency['avg']:.4f} s")
+	report.append(f"Median {mode} time:     \t{latency['median']:.4f} s")
+	report.append(f"1 % low {mode} time:    \t{latency['p1']:.4f} s")
+	report.append(f"1 % high {mode} time:   \t{latency['p99']:.4f} s")
+	report.append(f"0.1 % high {mode} time: \t{latency['p99_9']:.4f} s")
+	report.append(f"Highest {mode} time:    \t{latency['max']:.4f} s")
+	if estimated:
+		report.append("Note: sync figures are estimates: comprehensive mode splits the pass time across write/move/stat/read by their share of op time.")
+	report.append("-"*80)
+	return report
+
+def build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors):
+	results = {}
+	for key, stats in key_stats.items():
+		entry = dict(stats)
+		entry['sync_estimated'] = bool(sync_estimated.get(key))
+		late_n, late_max = late_starts.get(key, (0, 0.0))
+		entry['late_workers'] = late_n
+		entry['max_late_s'] = late_max
+		results[key] = entry
+	return {
+		'tool': 'iotest',
+		'version': version,
+		'host': socket.gethostname(),
+		'started': started,
+		'options': {'file_size': int(options.file_size), 'file_count': options.file_count,
+			'process_count': options.process_count, 'directories': options.directories,
+			'modes': options.modes, 'zeros': options.zeros, 'unique': options.unique},
+		'results': results,
+		'failed_ops': sum(stats['failed'] for stats in key_stats.values()),
+		'report_errors': list(report_errors),
+	}
+
+def write_json_summary(path, summary, tl, report_errors):
+	text = json.dumps(summary, indent=2) + '\n'
+	if path == '-':
+		sys.stdout.write(text)
+		sys.stdout.flush()
+	elif write_report_file(path, lambda f: f.write(text), tl, report_errors):
+		tl.teeprint(f"JSON written to {path}")
+
+def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None,unique=False,cleanup=False,json_path=None):
 	# the original entry point, kept for callers that pass options one by one
 	options = RunOptions(file_size=file_size, file_count=file_count, process_count=process_count,
 		modes=modes, directories=directory, quiet=quiet, zeros=zeros, stealth=stealth,
 		message_end_point_address=message_end_point_address, no_report=no_report,
 		threshold_to_report_anomaly=threshold_to_report_anomaly, benchmark_time=benchmarkTime,
-		unique=unique, cleanup=cleanup)
+		unique=unique, cleanup=cleanup, json_path=json_path)
 	return run_iotest(options, tl=tl, tuning_attempt=tuning_attempt,
 		simultaneous_write_count=simultaneous_write_count, simultaneous_run_id=simultaneous_run_id,
 		simultaneous_skip_layout=simultaneous_skip_layout, simultaneous_skip_cleanup=simultaneous_skip_cleanup,
@@ -1102,11 +1199,12 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		simultaneous_layout_workers=None, simultaneous_layout_process_count=None):
 	if tuning_attempt:
 		# an attempt only feeds the tuner: no report files, no short reports
-		options = options.replace(no_report=True, message_end_point_address=None)
+		options = options.replace(no_report=True, message_end_point_address=None, json_path=None)
 	if options.stealth:
 		options = options.replace(quiet=True, no_report=True)
 	# locals: the checks below may lower process_count or zero file_count, and the caller's
 	# options never change (tuning reuses them for every attempt)
+	started = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
 	file_size = int(options.file_size)
 	file_count = options.file_count
 	process_count = options.process_count
@@ -1313,7 +1411,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			for counter in range(process_count):
 				assigned_directory = directories[counter % len(directories)]
 				counter = worker_counter_name(counter, process_count)
-				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, read_recreates, late))
+				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, read_recreates, late, options.json_path == '-'))
 				processes.append(p)
 			totalStartTime = thread_start_time
 			for p in processes:
@@ -1370,79 +1468,30 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	report_errors = []
 	if not options.no_report and outResults:
 		report_base = os.path.join(primary_directory, report_base_name(modes, directories, file_size, file_count, process_count, tl.currentDateTime))
-	# calculate the summary for each key in outResults
-	# we need to calculate:
-	# average time
-	# median time
-	# 1 % low time
-	# 1 % high time
-	# 0.1 % high time
-	# highest time
-	# total bandwidth
-	# total size
 	report = []
 	short_reports = []
 	threshold_to_report_anomaly = options.threshold_to_report_anomaly
+	key_stats = {}
 	for mode in outResults:
-		report.append("*"*80)
-		report.append(f"Report for {mode} mode:")
-		if zeros:
-			report.append("Warning! Using zeros for file content. Compressed filesystems will show optimistic results.")
-		report.extend(dedup_notes)
+		stats = summarize_key(outResults[mode], failedOps.get(mode, []), mode_process_counts.get(mode, process_count), totalTime.get(mode), file_size, 'write' in mode or 'read' in mode)
+		key_stats[mode] = stats
 		failed = failedOps.get(mode, [])
-		op_count = len(outResults[mode]) + len(failed)
-		failed_note = ''
-		late_n, late_max = late_starts.get(mode, (0, 0.0))
-		if failed:
-			failed_note = f", {len(failed)} of {op_count} ops failed"
-			report.append(f"Failed {mode} ops:      \t{len(failed)} of {op_count}, first error: {failed[0]}")
-		if late_n:
-			report.append(f"Late starts:           \t{late_n} of {mode_process_counts.get(mode, process_count)} workers, up to {late_max:.4f} s late (sync figures include the delay)")
+		op_count = stats['ops'] + stats['failed']
+		failed_note = f", {stats['failed']} of {op_count} ops failed" if failed else ''
+		report.extend(format_key_report(mode, stats, late_starts.get(mode, (0, 0.0)), sync_estimated.get(mode), zeros, dedup_notes))
 		if not outResults[mode]:
-			report.append(f"No successful {mode} ops, skipping timing statistics.")
-			report.append("-"*80)
 			if options.message_end_point_address and failed:
 				short_reports.append(f"Short Report for {mode} mode: all {op_count} ops failed, first error: {failed[0]}")
 			continue
-		avg_time = sum(outResults[mode]) / len(outResults[mode])
-		outResults[mode].sort()
-		median_time = outResults[mode][len(outResults[mode]) // 2]
-		one_percent_low_time = outResults[mode][int(len(outResults[mode]) * 0.01)]
-		one_percent_high_time = outResults[mode][int(len(outResults[mode]) * 0.99)]
-		zero_point_one_percent_high_time = outResults[mode][int(len(outResults[mode]) * 0.999)]
-		highest_time = outResults[mode][-1]
-		effective_pc = mode_process_counts.get(mode, process_count)
-		call_iops, sync_iops = calc_iops(outResults[mode], totalTime.get(mode), effective_pc)
-		if 'write' in mode or 'read' in mode:
-			total_size = file_size * len(outResults[mode])
-			total_p_time = sum(outResults[mode]) / effective_pc
-			total_bandwidth = total_size / total_p_time
-			report.append(f"Total {mode} size:      \t{format_bytes(total_size)}B")
-			report.append(f"{mode} bandwidth (call):\t{format_bytes(total_bandwidth)}B/s")
-			report.append(f"                       \t{format_bytes(total_bandwidth * 8,use_1024_bytes=False)}bps")
-			report.append(f"{mode} bandwidth (sync):\t{format_bytes(total_size / totalTime[mode])}B/s")
-			report.append(f"                       \t{format_bytes(total_size / totalTime[mode] * 8,use_1024_bytes=False)}bps")
-			report.append(f"IO time % (IO wait):   \t{total_p_time / totalTime[mode] * 100:.2f}%")
-		report.append(f"Total {mode} ops:       \t{len(outResults[mode])}")
-		report.append(f"{mode} IOPS (call):     \t{format_iops(call_iops)}")
-		report.append(f"{mode} IOPS (sync):     \t{format_iops(sync_iops)}")
-		report.append(f"Average {mode} time:    \t{avg_time:.4f} s")
-		report.append(f"Median {mode} time:     \t{median_time:.4f} s")
-		report.append(f"1 % low {mode} time:    \t{one_percent_low_time:.4f} s")
-		report.append(f"1 % high {mode} time:   \t{one_percent_high_time:.4f} s")
-		report.append(f"0.1 % high {mode} time: \t{zero_point_one_percent_high_time:.4f} s")
-		report.append(f"Highest {mode} time:    \t{highest_time:.4f} s")
-		if sync_estimated.get(mode):
-			report.append("Note: sync figures are estimates: comprehensive mode splits the pass time across write/move/stat/read by their share of op time.")
-		report.append("-"*80)
-		if threshold_to_report_anomaly and threshold_to_report_anomaly > 0 and one_percent_high_time > (one_percent_low_time * threshold_to_report_anomaly):
+		latency = stats['latency_s']
+		if threshold_to_report_anomaly and threshold_to_report_anomaly > 0 and latency['p99'] > (latency['p1'] * threshold_to_report_anomaly):
 			report.append("Warning | iotest: 1% high is too high compared to 1% low!")
-			report.append(f"Warning | iotest: 1% high is {one_percent_high_time:.4f} s, 1% low is {one_percent_low_time:.4f} s, threshold is {threshold_to_report_anomaly}")
+			report.append(f"Warning | iotest: 1% high is {latency['p99']:.4f} s, 1% low is {latency['p1']:.4f} s, threshold is {threshold_to_report_anomaly}")
 		if options.message_end_point_address:
-			if 'write' in mode or 'read' in mode:
-				short_report = f"Short Report for {mode} mode: Speed {format_bytes(total_bandwidth)}B/s, {format_iops(call_iops)} IOPS @ {total_p_time / totalTime[mode] * 100:.2f}% IO time"
+			if stats['total_bytes'] is not None:
+				short_report = f"Short Report for {mode} mode: Speed {format_bytes(stats['bytes_per_s_call'])}B/s, {format_iops(stats['iops_call'])} IOPS @ {stats['io_time_pct']:.2f}% IO time"
 			else:
-				short_report = f"Short Report for {mode} mode: {format_iops(call_iops)} IOPS, avg {avg_time:.4f} s, median {median_time:.4f} s"
+				short_report = f"Short Report for {mode} mode: {format_iops(stats['iops_call'])} IOPS, avg {latency['avg']:.4f} s, median {latency['median']:.4f} s"
 			short_reports.append(short_report + failed_note)
 	# the text report goes first, so a failing result file cannot lose it
 	tl.teeprint('\n'.join(report))
@@ -1460,6 +1509,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		if write_report_file(report_file_name, lambda f: f.write('\n'.join(report)), tl, report_errors):
 			tl.teeprint(f"Report written to {report_file_name}")
 		print(f"Log file: {tl.logFileName}")
+	if options.json_path:
+		write_json_summary(options.json_path, build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors), tl, report_errors)
 	if options.cleanup:
 		cleanup_worker_files(directories, process_count, file_count)
 	if options.message_end_point_address and short_reports:
@@ -1527,7 +1578,7 @@ def _run_tuning_main(options, tl, process_count, simultaneous_write_count=None, 
 	return result
 
 def _finalize_tuning_run(options, tl, process_count, simultaneous_write_count=None, simultaneous_session=None):
-	if not options.no_report or options.message_end_point_address:
+	if not options.no_report or options.message_end_point_address or options.json_path:
 		kwargs = simultaneous_session or {}
 		result = run_iotest(options.replace(process_count=process_count), tl=tl,
 			simultaneous_write_count=simultaneous_write_count, **kwargs)
@@ -1928,6 +1979,7 @@ def climain():
 	parser.add_argument('-nr',"--no_report", action="store_true", help="Do not write report files",default=False)
 	parser.add_argument("-z","--zeros", action="store_true", help="Use zeros instead of random numbers. Use this if you are sure no write compression is available. Potentially higher write accuracy.",default=False)
 	parser.add_argument("-u","--unique_files", action="store_true", help="Stamp every 512-byte block with (file, block, worker) so no two blocks of the run are identical. Use on storage that deduplicates (iotest warns when it detects some). Adds a few ms per 30 MiB file to sync times.",default=False)
+	parser.add_argument("-j","--json", dest="json_path", metavar="PATH", type=str, help="Write a JSON summary of the run to PATH after the text report. Use - for stdout (with -S, stdout then carries only the JSON)",default=None)
 	parser.add_argument("-cl","--cleanup", action="store_true", help="Delete the test files when the run ends (default: keep them, so a later read run can reuse them)",default=False)
 	parser.add_argument('-addr',"--message_end_point_address", type=str, help="The end point address of the message")
 	parser.add_argument('--threshold_to_report_anomaly', type=float, help="The threshold to report if 1 percent high is higher then 1 percent low * <threshold_to_report_anomaly>",default=0)
@@ -2000,7 +2052,7 @@ def climain():
 		modes=modes, directories=args.directory, quiet=args.quiet, zeros=args.zeros, stealth=args.stealth,
 		message_end_point_address=args.message_end_point_address, no_report=args.no_report,
 		threshold_to_report_anomaly=args.threshold_to_report_anomaly, benchmark_time=args.benchmark_time,
-		unique=args.unique_files, cleanup=args.cleanup)
+		unique=args.unique_files, cleanup=args.cleanup, json_path=args.json_path)
 	# -S keeps the run settings out of the output, in the log only
 	echo = tl.info if args.stealth else tl.teeprint
 	echo(f'Running in {modes} modes...')
