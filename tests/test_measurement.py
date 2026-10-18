@@ -145,7 +145,7 @@ def test_random_mode_csv_columns_follow_the_keys(run_main, iotest_mod, work_dir,
     flips = iter([1, 0, 1, 0])
     monkeypatch.setattr(iotest_mod.random, "getrandbits", lambda n: next(flips))
     run_main(["random"], file_count=4, no_report=False)
-    csvs = list(work_dir.glob("*.csv"))
+    csvs = [p for p in work_dir.glob("*.csv") if not p.name.endswith("_ops.csv")]
     assert len(csvs) == 1
     assert csvs[0].read_text().splitlines()[0] == "random_write_time,random_read_time"
 

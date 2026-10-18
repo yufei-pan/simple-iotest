@@ -42,7 +42,7 @@ def test_long_directories_still_write_result_files(run_main, rec_tl, tmp_path):
     result = run_main(["write"], directory=dirs, process_count=2, tl=rec_tl, no_report=False)
     assert result["report_errors"] == []
     names = sorted(p.name for p in Path(dirs[0]).glob("iotest_*"))
-    assert len(names) == 2
+    assert len(names) == 3
     for name in names:
         assert len(name.encode()) <= 255
         assert re.search(r"~[0-9a-f]{8}_fs=", name)

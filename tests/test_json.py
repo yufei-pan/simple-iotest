@@ -136,7 +136,7 @@ def test_summarize_key_does_not_reorder_its_input(iotest_mod):
 def test_csv_column_matches_arrival_order_of_returned_results(run_main, rec_tl, work_dir):
     result = run_main(["write"], tl=rec_tl, no_report=False, file_count=20)
     times = result["outResults"]["write"]
-    csv_files = list(work_dir.glob("iotest_*.csv"))
+    csv_files = [p for p in work_dir.glob("iotest_*.csv") if not p.name.endswith("_ops.csv")]
     assert len(csv_files) == 1
     lines = csv_files[0].read_text().splitlines()
     assert [float(v) for v in lines[1:]] == times
