@@ -59,3 +59,20 @@ def test_ops_timeline_records_failed_op_with_error_and_no_duration(run_main, wor
 def test_no_report_writes_no_ops_file(run_main, work_dir, rec_tl):
     run_main(["write"], tl=rec_tl, no_report=True)
     assert list(work_dir.glob("*_ops.csv")) == []
+
+
+def test_write_timeline_orders_by_pass_then_start_and_formats_rows(iotest_mod, tmp_path):
+    rows = [
+        (1, "write", [("write", "1", 1, 0.5, 0.25, ""), ("write", "0", 1, 0.125, 0.5, "")]),
+        (2, "read", [("read", "0", 1, 0.0, None, "boom"), ("read", "1", 2, 0.0, 1.5, "")]),
+    ]
+    path = tmp_path / "ops.csv"
+    with path.open("w", newline="") as f:
+        iotest_mod.write_timeline(rows)(f)
+    assert path.read_bytes().decode().splitlines() == [
+        "pass,mode,op,worker,file_index,start_s,duration_s,error",
+        "1,write,write,0,1,0.125000,0.500000,",
+        "1,write,write,1,1,0.500000,0.250000,",
+        "2,read,read,0,1,0.000000,,boom",
+        "2,read,read,1,2,0.000000,1.500000,",
+    ]

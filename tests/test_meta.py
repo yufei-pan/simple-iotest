@@ -80,3 +80,14 @@ def test_meta_cleanup_removes_leftover_meta_dirs(run_main, work_dir):
 def test_meta_reserves_no_memory(iotest_mod):
     assert iotest_mod.memory_copies(["meta"]) == 0
     assert iotest_mod.memory_copies(["write", "meta"]) == 1
+
+
+def test_meta_only_run_leaves_no_directories(run_main, work_dir):
+    run_main(["meta"], process_count=2, file_count=3)
+    assert list(work_dir.rglob("*")) == []
+
+
+def test_meta_after_write_keeps_the_counter_dir_with_files(run_main, work_dir):
+    run_main(["write", "meta"], file_count=2)
+    assert not (work_dir / "0" / "meta").exists()
+    assert (work_dir / "0" / "temp_1.bin").exists()

@@ -85,3 +85,17 @@ def test_cli_rejects_start_at_with_throughput_tuning(work_dir):
     proc = run_cli(["-d", str(work_dir), "--start_at", str(time.time() + 60), "-wtpt", "100m"])
     assert proc.returncode == 2
     assert "--start_at cannot be combined with throughput tuning" in proc.stderr
+
+
+def test_start_at_prints_the_wait_and_json_reports_zero_lateness(run_main, rec_tl, work_dir):
+    path = work_dir / "out.json"
+    run_main(["write"], tl=rec_tl, start_at=time.time() + 4, json_path=str(path))
+    assert any(m.startswith("Waiting until ") and "for --start_at (" in m and m.endswith(" s)") for m in rec_tl.printed)
+    assert json.loads(path.read_text())["start_late_s"] == 0.0
+
+
+def test_start_at_too_soon_json_reports_lateness(run_main, rec_tl, work_dir):
+    path = work_dir / "out.json"
+    run_main(["write"], tl=rec_tl, start_at=time.time() + 0.05, json_path=str(path))
+    assert json.loads(path.read_text())["start_late_s"] > 0
+    assert not any(m.startswith("Waiting until ") for m in rec_tl.printed)

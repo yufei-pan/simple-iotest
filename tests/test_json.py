@@ -17,7 +17,8 @@ def test_json_summary_for_write_and_read(run_main, rec_tl, iotest_mod, tmp_path,
     result = run_main(["write", "read", "index"], tl=rec_tl, json_path=str(path))
     assert result["report_errors"] == []
     data = json.loads(path.read_text())
-    assert set(data) == {"tool", "version", "host", "started", "options", "results", "failed_ops", "report_errors"}
+    assert set(data) == {"tool", "version", "host", "started", "options", "start_late_s", "results", "failed_ops", "report_errors"}
+    assert data["start_late_s"] is None
     assert data["tool"] == "iotest"
     assert data["version"] == iotest_mod.version
     assert data["failed_ops"] == 0 and data["report_errors"] == []

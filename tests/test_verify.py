@@ -1,6 +1,8 @@
 import json
+import os
 import struct
 import zlib
+from pathlib import Path
 
 import pytest
 
@@ -195,3 +197,39 @@ def test_cli_verify_needs_a_file_size_of_at_least_8_bytes(tmp_path, size, code):
     else:
         data = (work / "0" / "temp_1.bin").read_bytes()
         assert len(data) == 8 and stored_crc(data) == computed_crc(data)
+
+
+def spy_verify_reads(iotest_mod, monkeypatch, log):
+    real = iotest_mod.read_file
+
+    def spy(*args, **kwargs):
+        with open(str(log), "a") as f:
+            f.write("{}\n".format(kwargs.get("verify")))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(iotest_mod, "read_file", spy)
+
+
+@pytest.mark.patches_workers
+def test_comprehensive_passes_verify_to_its_read(run_main, iotest_mod, monkeypatch, tmp_path):
+    log = tmp_path / "verify.log"
+    spy_verify_reads(iotest_mod, monkeypatch, log)
+    result = run_main(["comprehensive"], file_size=1024, verify=True)
+    assert not any(result["failedOps"].values())
+    assert log.read_text().split() == ["True"]
+
+
+@pytest.mark.patches_workers
+def test_simultaneous_readers_detect_a_flipped_layout_byte(run_main, iotest_mod, work_dir, monkeypatch):
+    real = iotest_mod.layout_read_worker
+
+    def corrupting(file_count, file_size, base_directory, run_id, counter, *args, **kwargs):
+        real(file_count, file_size, base_directory, run_id, counter, *args, **kwargs)
+        worker_dir = iotest_mod.simultaneous_worker_dir(base_directory, run_id, counter)
+        for name in sorted(os.listdir(worker_dir)):
+            flip(Path(worker_dir) / name, 0)
+
+    monkeypatch.setattr(iotest_mod, "layout_read_worker", corrupting)
+    result = run_main(["simultaneous"], process_count=2, file_count=2, file_size=1024, verify=True)
+    failed = [e for errors in result["failedOps"].values() for e in errors]
+    assert failed and all("CRC-32 mismatch" in e for e in failed)

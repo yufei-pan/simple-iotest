@@ -612,8 +612,10 @@ def remove_meta_leftovers(meta_dir):
 				pass
 
 def remove_meta_dir(meta_dir):
+	# the counter dir above it was made for the meta dir; rmdir leaves it alone if it still holds files
 	try:
 		os.rmdir(meta_dir)
+		os.rmdir(os.path.dirname(meta_dir))
 	except OSError:
 		pass
 
@@ -1295,15 +1297,17 @@ def report_base_name(modes, directories, file_size, file_count, process_count, c
 
 def collect_timeline(timeline_rows, pass_timeline, pass_index, mode):
 	if timeline_rows is not None:
-		timeline_rows.extend((pass_index, mode) + row for row in pass_timeline)
+		# one bulk fetch per pass; row-by-row iteration of the proxy costs a round trip per row
+		timeline_rows.append((pass_index, mode, pass_timeline[:]))
 
 def write_timeline(timeline_rows):
 	def write(f):
 		writer = csv.writer(f)
 		writer.writerow(['pass', 'mode', 'op', 'worker', 'file_index', 'start_s', 'duration_s', 'error'])
-		# stable sort by pass then start; workers append in their own order
-		for row in sorted(timeline_rows, key=lambda r: (r[0], r[5])):
-			writer.writerow(list(row[:5]) + ['%.6f' % row[5], '' if row[6] is None else '%.6f' % row[6], row[7]])
+		# passes are already in order; within one, a stable sort by start (workers append in their own order)
+		for pass_index, mode, rows in timeline_rows:
+			for row in sorted(rows, key=lambda r: r[3]):
+				writer.writerow([pass_index, mode, row[0], row[1], row[2], '%.6f' % row[3], '' if row[4] is None else '%.6f' % row[4], row[5]])
 	return write
 
 def write_report_file(path, write_content, tl, report_errors, newline=None):
@@ -1382,7 +1386,7 @@ def format_key_report(mode, stats, late, estimated, zeros, dedup_notes):
 	report.append("-"*80)
 	return report
 
-def build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors):
+def build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors, start_late=()):
 	results = {}
 	for key, stats in key_stats.items():
 		entry = dict(stats)
@@ -1402,6 +1406,8 @@ def build_json_summary(options, started, key_stats, late_starts, sync_estimated,
 			'start_at': options.start_at,
 			'block_size': None if options.block_size is None else int(options.block_size),
 			'verify': options.verify},
+		# how long the synchronized first pass started after --start_at; null without it
+		'start_late_s': None if options.start_at is None else (start_late[0] if start_late else 0.0),
 		'results': results,
 		'failed_ops': sum(stats['failed'] for stats in key_stats.values()),
 		'report_errors': list(report_errors),
@@ -1415,15 +1421,18 @@ def write_json_summary(path, summary, tl, report_errors):
 	elif write_report_file(path, lambda f: f.write(text), tl, report_errors):
 		tl.teeprint(f"JSON written to {path}")
 
-def first_pass_start(start_at, process_start_delay, tl, start_notes):
+def first_pass_start(start_at, process_start_delay, tl, start_notes, start_late):
 	# the synchronized pass waits for start_at; if too little time is left for the
 	# workers to prime, it starts after the usual delay instead and says how late
 	now = time.perf_counter()
 	remaining = start_at - time.time()
 	start_notes.append(f"Synchronized start at {datetime.datetime.fromtimestamp(start_at).astimezone().isoformat(timespec='seconds')} (--start_at)")
 	if remaining >= process_start_delay:
+		start_late.append(0.0)
+		tl.teeprint(f"Waiting until {datetime.datetime.fromtimestamp(start_at).astimezone().isoformat(timespec='seconds')} for --start_at ({remaining:.1f} s)")
 		return now + remaining
 	late_by = process_start_delay - remaining
+	start_late.append(late_by)
 	start_notes.append(f"Started {late_by:.1f} s late: less than the {process_start_delay:.1f} s process start delay was left")
 	tl.teelog(f"Warning | iotest: --start_at is too soon; the first pass starts {late_by:.1f} s late", level='warning')
 	return now + process_start_delay
@@ -1486,6 +1495,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	failedOps = {}
 	late_starts = {}
 	start_notes = []
+	start_late = []
 	sync_estimated = {}
 	totalTime = {}
 	mode_process_counts = {}
@@ -1639,7 +1649,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					write_processes = []
 					read_processes = []
 					if sync_start_at is not None:
-						thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes)
+						thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes, start_late)
 						sync_start_at = None
 					else:
 						thread_start_time = time.perf_counter() + processStartDelay
@@ -1687,7 +1697,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			late = manager.list()
 			pass_timeline = manager.list() if timeline_rows is not None else None
 			if sync_start_at is not None:
-				thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes)
+				thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes, start_late)
 				sync_start_at = None
 			else:
 				thread_start_time = time.perf_counter() + processStartDelay
@@ -1778,7 +1788,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				short_report = f"Short Report for {mode} mode: {format_iops(stats['iops_call'])} IOPS, avg {latency['avg']:.4f} s, median {latency['median']:.4f} s"
 			short_reports.append(short_report + failed_note)
 	# the text report goes first, so a failing result file cannot lose it
-	tl.teeprint('\n'.join(report))
+	# the workers' progress digits end without a newline; with the JSON on stdout they went to stderr
+	tl.teeprint(('\n' if quiet and not json_to_stdout else '') + '\n'.join(report))
 	if not options.no_report and outResults:
 		csv_file_name = report_base + REPORT_SUFFIXES[0]
 		def write_csv(f):
@@ -1797,7 +1808,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			tl.teeprint(f"Timeline written to {ops_file_name}")
 		print(f"Log file: {tl.logFileName}")
 	if options.json_path:
-		write_json_summary(options.json_path, build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors), tl, report_errors)
+		write_json_summary(options.json_path, build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors, start_late), tl, report_errors)
 	if options.cleanup:
 		cleanup_worker_files(directories, process_count, file_count)
 		if 'meta' in modes:
