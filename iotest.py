@@ -6,6 +6,7 @@ import functools
 import hashlib
 import itertools
 import json
+import math
 import os
 import random
 import re
@@ -851,7 +852,7 @@ class RunOptions:
 	# every option of one invocation; a new option is added here, with its default
 	def __init__(self, *, file_size, file_count, process_count, modes, directories=None,
 			quiet=True, zeros=False, stealth=False, message_end_point_address=None, no_report=False,
-			threshold_to_report_anomaly=0, benchmark_time=5, unique=False, cleanup=False, json_path=None):
+			threshold_to_report_anomaly=0, benchmark_time=5, unique=False, cleanup=False, json_path=None, start_at=None):
 		self.file_size = file_size
 		self.file_count = file_count
 		self.process_count = process_count
@@ -867,6 +868,7 @@ class RunOptions:
 		self.unique = unique
 		self.cleanup = cleanup
 		self.json_path = json_path
+		self.start_at = start_at
 
 	def replace(self, **changes):
 		values = dict(vars(self))
@@ -1224,7 +1226,8 @@ def build_json_summary(options, started, key_stats, late_starts, sync_estimated,
 		'started': started,
 		'options': {'file_size': int(options.file_size), 'file_count': options.file_count,
 			'process_count': options.process_count, 'directories': options.directories,
-			'modes': options.modes, 'zeros': options.zeros, 'unique': options.unique},
+			'modes': options.modes, 'zeros': options.zeros, 'unique': options.unique,
+			'start_at': options.start_at},
 		'results': results,
 		'failed_ops': sum(stats['failed'] for stats in key_stats.values()),
 		'report_errors': list(report_errors),
@@ -1238,13 +1241,26 @@ def write_json_summary(path, summary, tl, report_errors):
 	elif write_report_file(path, lambda f: f.write(text), tl, report_errors):
 		tl.teeprint(f"JSON written to {path}")
 
-def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None,unique=False,cleanup=False,json_path=None):
+def first_pass_start(start_at, process_start_delay, tl, start_notes):
+	# the synchronized pass waits for start_at; if too little time is left for the
+	# workers to prime, it starts after the usual delay instead and says how late
+	now = time.perf_counter()
+	remaining = start_at - time.time()
+	start_notes.append(f"Synchronized start at {datetime.datetime.fromtimestamp(start_at).astimezone().isoformat(timespec='seconds')} (--start_at)")
+	if remaining >= process_start_delay:
+		return now + remaining
+	late_by = process_start_delay - remaining
+	start_notes.append(f"Started {late_by:.1f} s late: less than the {process_start_delay:.1f} s process start delay was left")
+	tl.teelog(f"Warning | iotest: --start_at is too soon; the first pass starts {late_by:.1f} s late", level='warning')
+	return now + process_start_delay
+
+def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None,unique=False,cleanup=False,json_path=None,start_at=None):
 	# the original entry point, kept for callers that pass options one by one
 	options = RunOptions(file_size=file_size, file_count=file_count, process_count=process_count,
 		modes=modes, directories=directory, quiet=quiet, zeros=zeros, stealth=stealth,
 		message_end_point_address=message_end_point_address, no_report=no_report,
 		threshold_to_report_anomaly=threshold_to_report_anomaly, benchmark_time=benchmarkTime,
-		unique=unique, cleanup=cleanup, json_path=json_path)
+		unique=unique, cleanup=cleanup, json_path=json_path, start_at=start_at)
 	return run_iotest(options, tl=tl, tuning_attempt=tuning_attempt,
 		simultaneous_write_count=simultaneous_write_count, simultaneous_run_id=simultaneous_run_id,
 		simultaneous_skip_layout=simultaneous_skip_layout, simultaneous_skip_cleanup=simultaneous_skip_cleanup,
@@ -1290,6 +1306,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	outResults = dict()
 	failedOps = {}
 	late_starts = {}
+	start_notes = []
 	sync_estimated = {}
 	totalTime = {}
 	mode_process_counts = {}
@@ -1400,6 +1417,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			tl.teeprint(f"Generation test time:  \t{genTime:.4f} s")
 			tl.teeprint(f"Gen time calculated:   \t{genTimeCalc:.4f} s")
 			tl.teeprint(f"Process start delay:   \t{processStartDelay:.4f} s")
+		sync_start_at = options.start_at
 		for mode in modes:
 			if mode == 'benchmark':
 				continue
@@ -1429,7 +1447,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					pass_timeline = manager.list() if timeline_rows is not None else None
 					write_processes = []
 					read_processes = []
-					thread_start_time = time.perf_counter() + processStartDelay
+					if sync_start_at is not None:
+						thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes)
+						sync_start_at = None
+					else:
+						thread_start_time = time.perf_counter() + processStartDelay
 					tl.teeprint(f"Simultaneous mode: {write_count} writers + {read_count} readers...")
 					for counter in range(write_count):
 						assigned_directory = directories[counter % len(directories)]
@@ -1473,7 +1495,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			results = manager.list()
 			late = manager.list()
 			pass_timeline = manager.list() if timeline_rows is not None else None
-			thread_start_time = time.perf_counter() + processStartDelay
+			if sync_start_at is not None:
+				thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes)
+				sync_start_at = None
+			else:
+				thread_start_time = time.perf_counter() + processStartDelay
 			for counter in range(process_count):
 				assigned_directory = directories[counter % len(directories)]
 				counter = worker_counter_name(counter, process_count)
@@ -1535,7 +1561,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	report_errors = []
 	if not options.no_report and outResults:
 		report_base = os.path.join(primary_directory, report_base_name(modes, directories, file_size, file_count, process_count, tl.currentDateTime))
-	report = []
+	report = list(start_notes)
 	short_reports = []
 	threshold_to_report_anomaly = options.threshold_to_report_anomaly
 	key_stats = {}
@@ -2008,6 +2034,15 @@ def parse_size_arg(size_arg, unitless_as_mb=True):
 		return int(float(size_arg) * 1024 * 1024)
 	return int(float(size_arg))
 
+def start_at_arg(value):
+	try:
+		number = float(value)
+	except ValueError:
+		raise argparse.ArgumentTypeError(f"invalid epoch seconds: {value!r}")
+	if not math.isfinite(number) or number <= time.time():
+		raise argparse.ArgumentTypeError(f"must be a time in the future (epoch seconds), got {value}")
+	return number
+
 def positive_int(value):
 	number = int(value)
 	if number < 1:
@@ -2058,6 +2093,8 @@ def climain():
 		help="Target sync write throughput (e.g. 500m, 2g). Auto-tunes the first write pass.")
 	parser.add_argument("-rtpt", "--read_target_throughput", type=size_arg,
 		help="Target sync read throughput (e.g. 500m, 2g). Auto-tunes the first read pass.")
+	parser.add_argument("--start_at", type=start_at_arg, metavar="EPOCH", default=None,
+		help="Start the first timed pass at this time, in seconds since the Unix epoch (e.g. $(date -d '+1 min' +%%s)), so several hosts start together. Clocks must be in sync")
 	parser.add_argument("-V","--version", action="version", version=f"%(prog)s {version} @ {COMMIT_DATE} with teeLogger {Tee_Logger.version} {' and numpy ' if numpy_available else ''} by pan@zopyr.us")
 	args = parser.parse_args()
 	# if we are on windows, set the log directory to the current directory
@@ -2117,12 +2154,14 @@ def climain():
 			parser.error("-rtpt/--read_target_throughput requires a mode with a read pass (read, rw, comprehensive, simultaneous, etc.)")
 		read_target = args.read_target_throughput
 	throughput_tuning = write_target is not None or read_target is not None
+	if throughput_tuning and args.start_at is not None:
+		parser.error("--start_at cannot be combined with throughput tuning")
 	# without -d, args.directory is None and RunOptions uses the current directory
 	options = RunOptions(file_size=args.file_size, file_count=args.file_count, process_count=args.process_count,
 		modes=modes, directories=args.directory, quiet=args.quiet, zeros=args.zeros, stealth=args.stealth,
 		message_end_point_address=args.message_end_point_address, no_report=args.no_report,
 		threshold_to_report_anomaly=args.threshold_to_report_anomaly, benchmark_time=args.benchmark_time,
-		unique=args.unique_files, cleanup=args.cleanup, json_path=args.json_path)
+		unique=args.unique_files, cleanup=args.cleanup, json_path=args.json_path, start_at=args.start_at)
 	# -S keeps the run settings out of the output, in the log only
 	echo = tl.info if args.stealth else tl.teeprint
 	echo(f'Running in {modes} modes...')

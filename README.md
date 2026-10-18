@@ -74,7 +74,19 @@ iotest -fs 50m -fc 20 -pc 8 -d /tmp/iotest simultaneous
 Besides the per-mode CSV, every run that writes result files also writes `<name>_ops.csv`, one row per attempted operation, so you can see SSD cache exhaustion, throttling or stalls over time. Columns: `pass` (1-based index of the pass in this run; a simultaneous run is one pass), `mode` (the pass's mode), `op` (`write`, `read`, `move`, `stat` or `index`), `worker` (the worker's counter name, as used for its directory), `file_index` (1-based), `start_s` (seconds from the pass's common start time to the operation's start, 6 decimals; for a failed operation, when the attempt began), `duration_s` (6 decimals, empty for a failed operation) and `error` (empty on success, the error text on failure). Rows are sorted by pass, then `start_s`. Workers that died before reporting have no rows. `-nr` skips this file too.
 
 ### JSON summary
-`--json` is meant for collecting runs from many hosts (for example launched with `mssh`). Top level: `tool`, `version`, `host`, `started` (local time with UTC offset), `options` (`file_size`, `file_count`, `process_count` as requested, `directories`, `modes`, `zeros`, `unique`), `results`, `failed_ops` and `report_errors`. `results` has one entry per result key (`write`, `read`, `random_write`, ...), each with `ops`, `failed`, `first_error`, `process_count` (the count that ran, which the memory check can lower), `total_bytes`, `bytes_per_s_call`, `bytes_per_s_sync`, `io_time_pct`, `iops_call`, `iops_sync`, `latency_s` (`avg`, `median`, `p1`, `p99`, `p99_9`, `max`, in seconds; `null` when no op succeeded), `sync_estimated`, `late_workers` and `max_late_s`. Values that do not apply (bytes for `index`, for example) are `null`.
+`--json` is meant for collecting runs from many hosts (for example launched with `mssh`). Top level: `tool`, `version`, `host`, `started` (local time with UTC offset), `options` (`file_size`, `file_count`, `process_count` as requested, `directories`, `modes`, `zeros`, `unique`, `start_at`), `results`, `failed_ops` and `report_errors`. `results` has one entry per result key (`write`, `read`, `random_write`, ...), each with `ops`, `failed`, `first_error`, `process_count` (the count that ran, which the memory check can lower), `total_bytes`, `bytes_per_s_call`, `bytes_per_s_sync`, `io_time_pct`, `iops_call`, `iops_sync`, `latency_s` (`avg`, `median`, `p1`, `p99`, `p99_9`, `max`, in seconds; `null` when no op succeeded), `sync_estimated`, `late_workers` and `max_late_s`. Values that do not apply (bytes for `index`, for example) are `null`.
+
+### Multi-host runs
+`--start_at EPOCH` makes every host begin its first timed pass at the same wall-clock instant (seconds since the Unix epoch, e.g. `$(date -d '+1 min' +%s)`), so the storage sees the combined load. Compute the time once, locally, and pass it to every host:
+```bash
+T=$(date -d '+2 min' +%s)
+mssh node[1-8] "iotest -d /scratch/\$(hostname) --start_at $T -j /scratch/iotest-\$(hostname).json"
+```
+- The hosts' clocks must be in sync (NTP/chrony); iotest cannot correct for skew.
+- Only the first timed pass is synchronized (for `simultaneous`, the pass after its layout pass); later passes start as usual.
+- The time must be in the future when iotest parses its arguments, otherwise it exits with `2`. Leave enough time for the file generation benchmark; if less than the usual process start delay remains when the pass is scheduled, it starts after that delay instead, a warning says how late, and the report notes it.
+- It cannot be combined with `-wtpt`/`-rtpt`.
+- The report starts with `Synchronized start at <local time> (--start_at)`, and the JSON `options` carry `start_at`.
 
 ### Exit codes
 - `0`: the run completed and every operation succeeded.
@@ -88,7 +100,7 @@ $ iotest -h
 usage: iotest [-h] [-fs FILE_SIZE] [-fc FILE_COUNT] [-t PROCESS_COUNT] [-ts TOTAL_SIZE] [-d DIRECTORY]
               [-ld LOG_DIRECTORY] [-q] [-v] [-S] [-nl] [-nr] [-z] [-u] [-j PATH] [-cl] [-addr MESSAGE_END_POINT_ADDRESS]
               [--threshold_to_report_anomaly THRESHOLD_TO_REPORT_ANOMALY] [-bt BENCHMARK_TIME]
-              [-wtpt WRITE_TARGET_THROUGHPUT] [-rtpt READ_TARGET_THROUGHPUT] [-V]
+              [-wtpt WRITE_TARGET_THROUGHPUT] [-rtpt READ_TARGET_THROUGHPUT] [--start_at EPOCH] [-V]
               [{read,write,random,index,benchmark,comprehensive,simultaneous,r,w,rw,wr,i,rwi,wri,c,b,s} ...]
 
 Test total disk bandwidth. Default mode is write (w). Comprehensive mode: write -> move -> stat -> read
