@@ -87,6 +87,7 @@ Upgrading from 3.69 or earlier: worker directories used to be padded to the widt
 
 ### Measurement notes
 - Page cache: after each write is synced, iotest drops the file's pages (`posix_fadvise(DONTNEED)`) and before each read it does the same, so results reflect the storage. On macOS, which has no `posix_fadvise`, `F_NOCACHE` is set on every test file instead. On Windows neither exists, so reads may be served from cache.
+- Start delay: each pass starts at a common time, far enough ahead for the workers to start, make their file content (timed by the generation benchmark) and allocate and zero-fill their read buffers, before the timed pass. The buffer time is estimated from one allocation of up to 64 MiB, assuming parallel workers together go at most twice as fast as one; the `Read buffer alloc time` and `Process start delay` lines show the estimate.
 - Late starts: workers wait for a common start time. If some reach it late (for example, a slow start under heavy load), the report adds a line such as `Late starts:  3 of 36 workers, up to 0.0412 s late (sync figures include the delay)` and a warning is logged, even without `-v`. The returned result also carries them as `late_starts`.
 
 ### Per-operation timeline

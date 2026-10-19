@@ -1072,13 +1072,14 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 	content = FileContent(file_size, zeros, unique, new_stamp_id(), block_size, verify)
 	if role == 'write':
 		content.prepare()
+	# before the start barrier, as plain workers do: zero-filling it is not part of the timed pass
+	read_buffer = bytearray(block_size or file_size) if role == 'read' else None
 	if late_starts is not None and time.perf_counter() > thread_start_time:
 		late_starts.append(time.perf_counter() - thread_start_time)
 	wait_for_barrier(thread_start_time)
 	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
 	os.makedirs(worker_dir, exist_ok=True)
 	file_prefix = 'write_' if role == 'write' else 'read_'
-	read_buffer = bytearray(block_size or file_size) if role == 'read' else None
 	for i in range(file_count):
 		i_str = str(i + 1).zfill(len(str(file_count)))
 		file_name = os.path.join(worker_dir, f"{file_prefix}{i_str}.bin")
@@ -1252,6 +1253,44 @@ def benchmarkGenSpeed(file_size, file_count,zeros,results,timeout=5):
 	genSize = file_size * c
 	genSpeed = genSize / genTime 
 	results.append(genSpeed)
+
+# The generation benchmark times making file content; a worker's read buffer is timed here. bytearray()
+# zero-fills it (about 0.15 s/GiB on one core), so one sample allocation of up to this size gives the rate
+ALLOC_SAMPLE_BYTES = 64 * 2**20
+# workers allocate their read buffers at the same time and share the memory bandwidth: assume that together they
+# go at most this many times as fast as one alone (3-5x measured with 4 to 16 workers on a 32-thread machine),
+# with a margin for the noise of one sample
+ALLOC_PARALLEL_SPEEDUP = 2
+ALLOC_MARGIN = 1.5
+
+def measure_alloc_speed(buffer_size):
+	# bytes per second this process allocates a zero-filled bytearray at, from one of at most ALLOC_SAMPLE_BYTES
+	sample = min(buffer_size, ALLOC_SAMPLE_BYTES)
+	start = time.perf_counter()
+	buf = bytearray(sample)
+	elapsed = time.perf_counter() - start
+	del buf
+	return sample / elapsed if elapsed > 0 else None
+
+def read_buffer_workers(modes, process_count, simultaneous_write_count=None):
+	# how many workers of one pass allocate a read buffer before its start barrier, the most of any pass
+	if any(mode in ('read', 'random', 'comprehensive') for mode in modes):
+		return process_count
+	if 'simultaneous' in modes:
+		writers = process_count // 2 if simultaneous_write_count is None else simultaneous_write_count
+		return max(process_count - writers, 0)
+	return 0
+
+def read_buffer_alloc_time(buffer_size, workers, alloc_speed):
+	# seconds until the last of the workers has its read buffer, from the rate one alone allocates at
+	if not workers or not alloc_speed:
+		return 0.0
+	return buffer_size * workers / (alloc_speed * min(workers, ALLOC_PARALLEL_SPEEDUP)) * ALLOC_MARGIN
+
+def process_start_delay(process_count, gen_time=0.0, alloc_time=0.0):
+	# from scheduling a pass to its start barrier: the processes start, then each worker makes its file
+	# content and allocates its read buffer
+	return 0.005 * process_count + 1 + gen_time + alloc_time
 
 TUNING_TOLERANCE = 1.10
 MAX_TUNING_ATTEMPTS = 20
@@ -1780,21 +1819,22 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		effective_benchmark_time = options.benchmark_time
 		if is_simultaneous and tuning_attempt:
 			effective_benchmark_time = SIMULTANEOUS_TUNING_BENCHMARK_TIME
+		# measured before the generation benchmark's processes compete for memory bandwidth
+		alloc_workers = read_buffer_workers(modes, process_count, simultaneous_write_count)
+		alloc_time = read_buffer_alloc_time(buffer_size, alloc_workers, measure_alloc_speed(buffer_size)) if alloc_workers else 0.0
+		benchmarked = False
 		if is_simultaneous and gen_benchmark_workers == 0:
-			genSpeed = 0
 			genTimeCalc = 0
-			processStartDelay = 0.005 * process_count + 1
 			tl.teeprint("Skipping file generation benchmark (no write workers in simultaneous mode)")
 		elif all(mode in ('read', 'index', 'meta') for mode in modes) and not any(recreating[:process_count]):
 			# it estimates how long workers take to generate data before the start barrier
-			genSpeed = 0
 			genTimeCalc = 0
-			processStartDelay = 0.005 * process_count + 1
 			if 'meta' in modes:
 				tl.teeprint("Skipping file generation benchmark (read, index and meta workers generate no data up front)")
 			else:
 				tl.teeprint("Skipping file generation benchmark (read and index workers generate no data up front)")
 		else:
+			benchmarked = True
 			if zeros:
 				generator = 'zeros'
 			elif numpy_available:
@@ -1816,15 +1856,17 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			genSpeed = sum(results[:])
 			if genSpeed > 0:
 				genTimeCalc = buffer_size * gen_benchmark_workers / genSpeed
-				processStartDelay = 0.005 * process_count + 1 + genTimeCalc
 			else:
 				genTimeCalc = 0
-				processStartDelay = 0.005 * process_count + 1
 				tl.teeerror("File generation benchmark returned zero speed; using minimal process start delay")
 			tl.teeprint(f"Generation speed:      \t{format_bytes(genSpeed)}B/s")
 			tl.teeprint(f"                       \t{format_bytes(genSpeed * 8,use_1024_bytes=False)}b/s")
 			tl.teeprint(f"Generation test time:  \t{genTime:.4f} s")
 			tl.teeprint(f"Gen time calculated:   \t{genTimeCalc:.4f} s")
+		processStartDelay = process_start_delay(process_count, genTimeCalc, alloc_time)
+		if alloc_workers:
+			tl.teeprint(f"Read buffer alloc time:\t{alloc_time:.4f} s")
+		if benchmarked or alloc_workers:
 			tl.teeprint(f"Process start delay:   \t{processStartDelay:.4f} s")
 		sync_start_at = options.start_at
 		# a meta run is three passes with their own barriers; a read pass carries which workers recreate files

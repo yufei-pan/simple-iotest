@@ -1,4 +1,5 @@
 import os
+import tracemalloc
 
 import pytest
 
@@ -185,3 +186,102 @@ def test_plain_write_pass_has_no_estimate_note(run_main, rec_tl):
     result = run_main(["write"], tl=rec_tl)
     assert result["sync_estimated"] == {"write": False}
     assert not any("sync figures are estimates" in m for m in rec_tl.messages)
+
+
+MiB = 2 ** 20
+
+
+def test_read_buffer_alloc_time(iotest_mod):
+    alloc = iotest_mod.read_buffer_alloc_time
+    margin = iotest_mod.ALLOC_MARGIN
+    # one worker: its buffer at the measured rate, plus the margin
+    assert alloc(2 ** 30, 1, 2 ** 30) == pytest.approx(1 * margin)
+    # parallel workers share the memory bandwidth: together at most twice as fast as one
+    assert alloc(2 ** 30, 2, 2 ** 30) == pytest.approx(1 * margin)
+    assert alloc(2 ** 30, 8, 2 ** 30) == pytest.approx(4 * margin)
+    assert alloc(512 * MiB, 8, 2 ** 30) == pytest.approx(2 * margin)
+    # no worker allocates one, or no rate could be measured
+    assert alloc(2 ** 30, 0, 2 ** 30) == 0
+    assert alloc(2 ** 30, 8, None) == 0
+
+
+def test_process_start_delay(iotest_mod):
+    assert iotest_mod.process_start_delay(36) == pytest.approx(1.18)
+    assert iotest_mod.process_start_delay(36, 0.5, 2.0) == pytest.approx(3.68)
+
+
+@pytest.mark.parametrize(
+    "modes,write_count,workers",
+    [
+        (["read"], None, 6),
+        (["random"], None, 6),
+        (["comprehensive"], None, 6),
+        (["write", "read", "index"], None, 6),
+        # simultaneous: only its readers
+        (["simultaneous"], None, 3),
+        (["simultaneous"], 4, 2),
+        (["write"], None, 0),
+        (["index", "meta"], None, 0),
+    ],
+)
+def test_read_buffer_workers(iotest_mod, modes, write_count, workers):
+    assert iotest_mod.read_buffer_workers(modes, 6, write_count) == workers
+
+
+def test_alloc_speed_sample_is_at_most_64_mib(iotest_mod):
+    tracemalloc.start()
+    try:
+        speed = iotest_mod.measure_alloc_speed(8 * 2 ** 30)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert speed > 0
+    assert 64 * MiB <= peak < 65 * MiB
+
+
+@pytest.mark.parametrize("prepared", [True, False])
+def test_start_delay_covers_read_buffer_allocation(run_main, iotest_mod, monkeypatch, rec_tl, prepared):
+    # 100 KiB/s: 2 workers x 1 KiB buffers take 2 KiB / (2 x 100 KiB/s) = 0.01 s, plus the margin. Read-only
+    # runs with every file in place skip the generation benchmark, and the delay was 0.005 x pc + 1 s
+    if prepared:
+        run_main(["write"], process_count=2)
+    sizes = []
+    monkeypatch.setattr(iotest_mod, "measure_alloc_speed", lambda size: sizes.append(size) or 100 * 1024)
+    run_main(["read"], process_count=2, tl=rec_tl)
+    assert sizes == [1024]
+    alloc = 0.01 * iotest_mod.ALLOC_MARGIN
+    assert f"Read buffer alloc time:\t{alloc:.4f} s" in rec_tl.printed
+    delays = [line for line in rec_tl.printed if line.startswith("Process start delay:")]
+    (delay,) = delays
+    gen = 0.0
+    if not prepared:
+        # the workers recreate the files, so they also generate content first
+        (gen_line,) = [line for line in rec_tl.printed if line.startswith("Gen time calculated:")]
+        gen = float(gen_line.split("\t")[1].split()[0])
+    assert float(delay.split("\t")[1].split()[0]) == pytest.approx(0.005 * 2 + 1 + gen + alloc, abs=2e-4)
+
+
+def test_write_runs_add_no_read_buffer_allocation(run_main, iotest_mod, monkeypatch, rec_tl):
+    monkeypatch.setattr(iotest_mod, "measure_alloc_speed", lambda size: pytest.fail("no read buffers to time"))
+    run_main(["write", "index"], tl=rec_tl)
+    assert not any(line.startswith("Read buffer alloc time") for line in rec_tl.printed)
+    assert sum(line.startswith("Process start delay") for line in rec_tl.printed) == 1
+
+
+def test_simultaneous_reader_allocates_its_buffer_before_the_start_barrier(iotest_mod, work_dir, rec_tl, monkeypatch):
+    iotest_mod.run_simultaneous_layout(1, 4096, [str(work_dir)], "t", 1, True, True, rec_tl)
+    made_at = []
+    real = bytearray
+
+    def spy(*args):
+        if args == (4096,):
+            made_at.append(iotest_mod.time.perf_counter())
+        return real(*args)
+
+    monkeypatch.setattr(iotest_mod, "bytearray", spy, raising=False)
+    start = iotest_mod.time.perf_counter() + 0.3
+    results = []
+    iotest_mod.simultaneous_role_worker("read", 1, 4096, str(work_dir), "t", iotest_mod.worker_counter_name(0),
+        results, True, True, start)
+    assert len(made_at) == 1 and made_at[0] < start
+    assert not [s for s in iotest_mod.result_samples(results) if isinstance(s, str)]
