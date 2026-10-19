@@ -129,6 +129,27 @@ def tick_on_crc(iotest_mod, monkeypatch):
     return marks
 
 
+CHUNKED_SIZE = 2 * 2**20 + 100
+
+
+# a data byte in the first chunk, one in the second round of the 1 MiB chunk pool, and one inside the trailer
+@pytest.mark.parametrize("position", [100, 2**20 + 5000, CHUNKED_SIZE - 2])
+def test_files_larger_than_the_chunk_pool_verify_and_a_flipped_byte_fails(run_main, iotest_mod, work_dir, position):
+    # the second file is written from the pool the first one's tags and trailer went into
+    assert iotest_mod.content_size(CHUNKED_SIZE, 4096) < CHUNKED_SIZE
+    result = run_main(["write", "read"], file_count=2, file_size=CHUNKED_SIZE, zeros=False, verify=True,
+        block_size=4096)
+    assert iotest_mod.total_failed_ops(result) == 0
+    for name in ("temp_1.bin", "temp_2.bin"):
+        data = (work_dir / "0000" / name).read_bytes()
+        assert len(data) == CHUNKED_SIZE and stored_crc(data) == computed_crc(data)
+    path = work_dir / "0000" / "temp_2.bin"
+    data = flip(path, position)
+    result = run_main(["read"], file_count=2, file_size=CHUNKED_SIZE, verify=True, block_size=4096)
+    assert result["failedOps"]["read"] == [mismatch(path, data)]
+    assert len(result["outResults"]["read"]) == 1
+
+
 def test_whole_file_crc_stays_outside_the_timed_write_and_read(iotest_mod, tmp_path, monkeypatch):
     marks = tick_on_crc(iotest_mod, monkeypatch)
     target = str(tmp_path / "f.bin")

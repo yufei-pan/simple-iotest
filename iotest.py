@@ -300,9 +300,9 @@ def stamp_unique(buf, worker_id, file_index, first_block=0):
 
 def stamp_chunk(chunk, offset, worker_id, file_index):
 	# with -bs a file is stamped one chunk at a time, at its offset in the file; the tags land
-	# at the offsets whole-file stamping uses, so every 512-byte block has its own tag, but the
-	# reused block buffer keeps the earlier chunks' tag bytes (and the previous file's CRC
-	# trailer) elsewhere, so with -z -u -bs the bytes between tags are not all zeros. A chunk
+	# at the offsets whole-file stamping uses, so every 512-byte block has its own tag, and on
+	# the same bytes of the reused chunk pool (chunk_span()), but the previous file's CRC trailer
+	# stays in the pool, so with -z -u --verify -bs the bytes between tags are not all zeros. A chunk
 	# that starts inside a 512-byte block (a -bs that is not a multiple of 512) first finishes
 	# the tag the previous one began
 	block, into = divmod(offset, UNIQUE_STAMP_INTERVAL)
@@ -326,6 +326,36 @@ def effective_block_size(block_size, file_size):
 	if block_size is None or block_size >= file_size:
 		return None
 	return int(block_size)
+
+# With -bs a worker writes the chunks of its files from one pool of file content, CHUNK_POOL_SIZE and one block (or
+# the file size if smaller), each chunk from its own place in it (chunk_span()): a file is not one block repeated,
+# which storage that compresses (ZFS, btrfs, arrays) would store in a fraction of the bytes, inflating the figures
+CHUNK_POOL_SIZE = 2**20
+
+def content_size(file_size, block_size):
+	# the file content a worker holds and writes from: the whole file, or with -bs its chunk pool
+	if block_size is None:
+		return file_size
+	return min(file_size, CHUNK_POOL_SIZE + block_size)
+
+def chunk_span(buffer_size, block_size, file_size, stamped):
+	# each chunk starts in the buffer at its offset in the file modulo this: in a buffer that holds the file at
+	# its own place, in a one-block one at the start. In a chunk pool it is the number of places a whole block
+	# can start, CHUNK_POOL_SIZE + 1 (CHUNK_POOL_SIZE with -u), so a byte of the pool comes back in the file only
+	# a multiple of the span later: never twice within CHUNK_POOL_SIZE (a compression record), nor in consecutive
+	# chunks. One modulo per chunk is all the timed write does for it
+	if buffer_size >= file_size:
+		return max(file_size, 1)
+	span = buffer_size - block_size + 1
+	if stamped:
+		# -u stamps each chunk in place at the file's 512-byte blocks: a whole number of them puts every tag on
+		# the same bytes of the pool, so stamping never leaves earlier chunks' tags in the data
+		span -= span % UNIQUE_STAMP_INTERVAL
+	elif span % 2 == 0:
+		# odd, so each time the file comes round the pool its bytes sit at another place in the file's
+		# 512-byte blocks, which deduplicating storage compares
+		span -= 1
+	return max(span, 1)
 
 VERIFY_TRAILER = struct.Struct('<I')
 
@@ -362,7 +392,7 @@ class CrcTrailer:
 		return f"verify failed: {file_name}: CRC-32 mismatch (stored 0x{stored:08x}, computed 0x{self.crc:08x})"
 
 class FileContent:
-	# what a worker writes, reused for all its files: the whole file, or one block with -bs.
+	# what a worker writes, reused for all its files: the whole file, or with -bs its chunk pool (content_size()).
 	# Made on first use (or by prepare), so read workers whose files all exist never hold it.
 	def __init__(self, file_size, zeros, unique, stamp_id, block_size=None, verify=False):
 		self.file_size = file_size
@@ -375,14 +405,14 @@ class FileContent:
 
 	def prepare(self):
 		if self.content is None:
-			self.content = make_file_content(self.block_size or self.file_size, self.zeros, self.unique)
+			self.content = make_file_content(content_size(self.file_size, self.block_size), self.zeros, self.unique)
 
 	def write(self, file_name, index, quiet=False):
 		self.prepare()
 		stamp = None
 		seal = None
 		if self.unique and self.block_size:
-			# the block is reused for the whole file, so each chunk is stamped as it goes out, inside the timed write
+			# the pool is reused for every chunk, so each one is stamped as it goes out, inside the timed write
 			stamp = functools.partial(stamp_chunk, worker_id=self.stamp_id, file_index=index)
 		elif self.unique:
 			stamp_unique(self.content, self.stamp_id, index)
@@ -415,14 +445,20 @@ def disable_os_cache(fd):
 	except OSError:
 		pass
 
-def file_chunks(buffer, file_size, block_size):
-	# (offset in the file, view) for each part of the file one write/read is asked for: the
-	# whole file from a file-size buffer, or with -bs block_size bytes at a time from one block
+def file_chunks(buffer, file_size, block_size, stamped=False):
+	# (offset in the file, view) for each part of the file one write/read is asked for: the whole file at once,
+	# or with -bs block_size bytes at a time, each from its place in the buffer (chunk_span()). stamped: each
+	# chunk is stamped in place before it is written. Set up when called, so callers call it before their timer
 	view = memoryview(buffer)
 	# max(): an empty file still needs a non-zero range() step
 	step = block_size or max(file_size, 1)
-	for offset in range(0, file_size, step):
-		yield offset, view[:min(step, file_size - offset)]
+	span = chunk_span(len(view), step, file_size, stamped)
+
+	def chunks():
+		for offset in range(0, file_size, step):
+			start = offset % span
+			yield offset, view[start:start + min(step, file_size - offset)]
+	return chunks()
 
 def write_chunk(f, chunk, offset, file_name, file_size, quiet):
 	written = 0
@@ -457,13 +493,14 @@ def read_chunk(f, chunk, offset, file_name, file_size, quiet):
 		got += n
 
 def create_file(file_name, file_content, file_size, quiet=False, block_size=None, stamp=None, seal=None):
-	# with block_size, file_content is one block written again and again; stamp(chunk, offset)
-	# marks each chunk for -u and then seal(chunk, offset) adds it to the --verify CRC, just before it is written
+	# with block_size, each chunk is a view into file_content, a chunk pool (file_chunks()); stamp(chunk, offset)
+	# marks each chunk for -u in place and then seal(chunk, offset) adds it to the --verify CRC, just before it is written
 	try:
 		with open(file_name, "wb", buffering=0) as f:
 			disable_os_cache(f.fileno())
+			chunks = file_chunks(file_content, file_size, block_size, stamped=stamp is not None)
 			start_write_time = time.perf_counter()
-			for offset, chunk in file_chunks(file_content, file_size, block_size):
+			for offset, chunk in chunks:
 				if stamp is not None:
 					stamp(chunk, offset)
 				if seal is not None:
@@ -527,8 +564,9 @@ def read_file(file_name, file_content, file_size, quiet=False, buffer=None, recr
 			except (AttributeError, OSError):
 				# AttributeError: macOS is posix but has no posix_fadvise
 				worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
+			chunks = file_chunks(b, file_size, block_size)
 			start_read_time = time.perf_counter()
-			for offset, chunk in file_chunks(b, file_size, block_size):
+			for offset, chunk in chunks:
 				read_chunk(f, chunk, offset, file_name, file_size, quiet)
 				if trailer is not None and block_size:
 					# the next chunk reuses the buffer, so the CRC is taken now, inside the timed read
@@ -1389,16 +1427,22 @@ def read_pass_recreates(modes, scan, process_count):
 				passes[index] = [not left] * process_count
 	return passes
 
-# data buffers a worker holds in a pass of each mode: its file content (writers, and the generation benchmark's
-# processes), its read buffer (readers, simultaneous ones included), or both. Index and meta passes move no data
-BUFFER_COPIES = {'write': 1, 'read': 1, 'random': 2, 'comprehensive': 2, 'simultaneous': 1, 'benchmark': 1,
-	'index': 0, 'meta': 0}
+# data buffers a worker holds in a pass of each mode, as (file content, read buffers): its file content (writers,
+# and the generation benchmark's processes), its read buffer (readers), or both. A simultaneous worker writes or
+# reads, and counts as a writer: file content is never smaller than a read buffer. Index and meta passes move no data
+BUFFER_COPIES = {'write': (1, 0), 'read': (0, 1), 'random': (1, 1), 'comprehensive': (1, 1), 'simultaneous': (1, 0),
+	'benchmark': (1, 0), 'index': (0, 0), 'meta': (0, 0)}
 
-def memory_copies(modes, read_recreates=False):
-	# the most buffers a worker holds at once, in any of its passes: a read worker that recreates files also
+def buffer_memory(modes, buffer_size, read_size, read_recreates=False):
+	# the most a worker's data buffers take at once, in any of its passes, with file content of buffer_size and
+	# read buffers of read_size (with sizes of 1, how many it holds): a read worker that recreates files also
 	# holds their content
-	return max((BUFFER_COPIES.get(mode, 0) + (1 if mode == 'read' and read_recreates else 0) for mode in modes),
-		default=0)
+	def held(mode):
+		contents, reads = BUFFER_COPIES.get(mode, (0, 0))
+		if mode == 'read' and read_recreates:
+			contents += 1
+		return contents * buffer_size + reads * read_size
+	return max((held(mode) for mode in modes), default=0)
 
 # ops each process performs per file in each mode (meta is three passes of one op)
 OPS_PER_FILE = {'write': 1, 'read': 1, 'random': 1, 'index': 1, 'comprehensive': 4, 'meta': 3, 'simultaneous': 1}
@@ -1422,15 +1466,17 @@ RESULT_BYTES_PER_OP = {'write': 110, 'read': 110, 'index': 110, 'simultaneous': 
 TIMELINE_BYTES_PER_OP = {'write': 110, 'read': 110, 'index': 110, 'simultaneous': 100, 'comprehensive': 110,
 	'random': 110, 'meta': 70}
 
-def memory_per_process(modes, buffer_size, file_count, read_recreates=False, timeline=False):
-	# a worker's data buffers, plus what the parent and the manager keep for every op it performs over the run
+def memory_per_process(modes, buffer_size, file_count, read_recreates=False, timeline=False, read_size=None):
+	# a worker's data buffers (file content of buffer_size, read buffers of read_size, by default the same), plus
+	# what the parent and the manager keep for every op it performs over the run
 	op_bytes = sum(OPS_PER_FILE.get(mode, 0) * (RESULT_BYTES_PER_OP.get(mode, 0)
 		+ (TIMELINE_BYTES_PER_OP.get(mode, 0) if timeline else 0)) for mode in modes)
-	return buffer_size * memory_copies(modes, read_recreates) * 1.2 + file_count * op_bytes
+	read_size = buffer_size if read_size is None else read_size
+	return buffer_memory(modes, buffer_size, read_size, read_recreates) * 1.2 + file_count * op_bytes
 
-def workers_memory(modes, buffer_size, file_count, recreates, timeline=False):
+def workers_memory(modes, buffer_size, file_count, recreates, timeline=False, read_size=None):
 	# memory_per_process() of each worker, in counter order, by whether it recreates files in a read pass
-	figures = [memory_per_process(modes, buffer_size, file_count, flag, timeline) for flag in (False, True)]
+	figures = [memory_per_process(modes, buffer_size, file_count, flag, timeline, read_size) for flag in (False, True)]
 	return [figures[1 if flag else 0] for flag in recreates]
 
 def fitting_process_count(worker_memory, available):
@@ -1727,8 +1773,10 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	verify = options.verify
 	directories = options.directories
 	block_size = effective_block_size(options.block_size, file_size)
-	# what each worker holds: one block with -bs, the whole file otherwise
-	buffer_size = block_size or file_size
+	# what each worker holds: file content to write, the whole file or with -bs its chunk pool, and a read
+	# buffer, the whole file or one block
+	buffer_size = content_size(file_size, block_size)
+	read_size = block_size or file_size
 	if not tl:
 		tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
 	if not directories:
@@ -1760,7 +1808,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	recreate_passes = read_pass_recreates(modes, scan, process_count)
 	# per worker: whether it recreates files in some read pass, and so holds a second buffer
 	recreating = [any(flags[counter] for flags in recreate_passes.values()) for counter in range(process_count)]
-	worker_memory = workers_memory(modes, buffer_size, file_count, recreating, options.timeline)
+	worker_memory = workers_memory(modes, buffer_size, file_count, recreating, options.timeline, read_size)
 	estimatedTotalMemory = sum(worker_memory)
 	if modes == ['benchmark']:
 		file_count = 0
@@ -1821,7 +1869,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			effective_benchmark_time = SIMULTANEOUS_TUNING_BENCHMARK_TIME
 		# measured before the generation benchmark's processes compete for memory bandwidth
 		alloc_workers = read_buffer_workers(modes, process_count, simultaneous_write_count)
-		alloc_time = read_buffer_alloc_time(buffer_size, alloc_workers, measure_alloc_speed(buffer_size)) if alloc_workers else 0.0
+		alloc_time = read_buffer_alloc_time(read_size, alloc_workers, measure_alloc_speed(read_size)) if alloc_workers else 0.0
 		benchmarked = False
 		if is_simultaneous and gen_benchmark_workers == 0:
 			genTimeCalc = 0
@@ -1842,7 +1890,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			else:
 				generator = 'random.getrandbits'
 			# workers generate only the buffer they hold
-			buffer_kind = 'blocks' if block_size else 'files'
+			buffer_kind = 'chunk pools' if block_size else 'files'
 			tl.teeprint(f"Benchmarking file generation performance... using {gen_benchmark_workers}x {generator} with {format_bytes(buffer_size)}B {buffer_kind} * {file_count if file_count else '∞'} for {effective_benchmark_time}s")
 			for counter in range(gen_benchmark_workers):
 				p = Process(target=benchmarkGenSpeed, args=(buffer_size, file_count,zeros,results,effective_benchmark_time))
@@ -2542,7 +2590,7 @@ def climain():
 
 	parser = argparse.ArgumentParser(description="Test total disk bandwidth. Default mode is write (w). Comprehensive mode: write -> move -> stat -> read")
 	parser.add_argument("-fs","--file_size", type=size_arg, help="File size (default:30), defaults to mb, can specify in t(b),g(b),m(b),k(b),b", default=None)
-	parser.add_argument("-bs","--block_size", type=size_arg, help="Write and read each file in calls of this size from one buffer of this size per worker, instead of the whole file in one call (default). Same units as -fs", default=None)
+	parser.add_argument("-bs","--block_size", type=size_arg, help="Write and read each file in calls of this size instead of the whole file in one call (default): each worker reads into one buffer of this size and writes from a pool of 1 MiB of test data and one block, so the file does not repeat within any 1 MiB. Same units as -fs", default=None)
 	parser.add_argument("-fc","--file_count", type=positive_int, help="Number of files to create and read per process (default:50)",default=None)
 	parser.add_argument("-t",'-pc',"--process_count", type=positive_int, help="Number of processes to run concurrently (default:36)", default=None)
 	parser.add_argument("-ts","--total_size", type=size_arg, help="Total size target. If -fs/-fc/-pc is omitted, auto-calculate one missing arg to fit this total size.")

@@ -89,29 +89,34 @@ def test_simultaneous_reader_reuses_one_read_buffer(iotest_mod, work_dir, monkey
 
 
 @pytest.mark.parametrize(
-    "modes,read_recreates,copies",
+    "modes,read_recreates,contents,reads",
     [
-        (["write"], False, 1),
+        (["write"], False, 1, 0),
         # index and meta move no data
-        (["index"], False, 0),
-        (["meta"], False, 0),
-        (["index", "meta"], False, 0),
-        (["index", "write"], False, 1),
-        (["meta", "read"], True, 2),
-        # the generation benchmark's processes each hold a buffer
-        (["benchmark"], False, 1),
+        (["index"], False, 0, 0),
+        (["meta"], False, 0, 0),
+        (["index", "meta"], False, 0, 0),
+        (["index", "write"], False, 1, 0),
+        (["meta", "read"], True, 1, 1),
+        # the generation benchmark's processes each hold file content
+        (["benchmark"], False, 1, 0),
         # read workers hold only their read buffer, unless they have files to recreate
-        (["read"], False, 1),
-        (["read"], True, 2),
-        (["write", "read"], False, 1),
-        (["simultaneous"], False, 1),
+        (["read"], False, 0, 1),
+        (["read"], True, 1, 1),
+        # the write pass holds more: file content is never smaller than a read buffer
+        (["write", "read"], False, 1, 0),
+        # a writer or a reader, counted as a writer
+        (["simultaneous"], False, 1, 0),
         # these workers write and read, so they hold file content and a read buffer
-        (["comprehensive"], False, 2),
-        (["random"], False, 2),
+        (["comprehensive"], False, 1, 1),
+        (["random"], False, 1, 1),
     ],
 )
-def test_memory_copies_per_mode(iotest_mod, modes, read_recreates, copies):
-    assert iotest_mod.memory_copies(modes, read_recreates) == copies
+def test_buffer_memory_per_mode(iotest_mod, modes, read_recreates, contents, reads):
+    # the most any one pass holds: file content (the whole file, or with -bs the chunk pool) and read buffers
+    # (the whole file, or one block) count at their own sizes
+    assert iotest_mod.buffer_memory(modes, 1000, 1, read_recreates) == contents * 1000 + reads
+    assert iotest_mod.buffer_memory(modes, 1, 1, read_recreates) == contents + reads
 
 
 @pytest.mark.parametrize(

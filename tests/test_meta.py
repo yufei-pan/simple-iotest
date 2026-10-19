@@ -78,8 +78,8 @@ def test_meta_cleanup_removes_leftover_meta_dirs(run_main, work_dir):
 
 
 def test_meta_reserves_no_memory(iotest_mod):
-    assert iotest_mod.memory_copies(["meta"]) == 0
-    assert iotest_mod.memory_copies(["write", "meta"]) == 1
+    assert iotest_mod.buffer_memory(["meta"], 1024, 1024) == 0
+    assert iotest_mod.buffer_memory(["write", "meta"], 1024, 1024) == 1024
 
 
 def test_meta_only_run_leaves_no_directories(run_main, work_dir):

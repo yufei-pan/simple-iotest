@@ -1,7 +1,9 @@
+import ctypes
 import functools
 import json
 import os
 import tracemalloc
+import zlib
 
 import pytest
 
@@ -50,15 +52,17 @@ def traced_peak(fn, *args, **kwargs):
 
 @pytest.mark.parametrize("zeros", [True, False])
 @pytest.mark.parametrize("block_size", [1024, 1000])
-def test_chunked_unique_files_keep_their_size_and_never_repeat_a_block(iotest_mod, tmp_path, monkeypatch, zeros, block_size):
+# a file the chunk pool holds, and one larger than the pool, whose chunks come from moving starts in it
+@pytest.mark.parametrize("file_size", [8192 + 100, 2 * MiB + 100])
+def test_chunked_unique_files_keep_their_size_and_never_repeat_a_block(iotest_mod, tmp_path, monkeypatch, zeros, block_size, file_size):
     # 1000 is not a multiple of 512, so stamps straddle the chunks
     for use_numpy in stamp_paths(iotest_mod):
         monkeypatch.setattr(iotest_mod, "numpy_available", use_numpy)
         d = tmp_path / str(use_numpy)
         d.mkdir()
-        iotest_mod.worker(2, 8192 + 100, str(d), [], "write", "0000", True, zeros, 0, True, block_size=block_size)
+        iotest_mod.worker(2, file_size, str(d), [], "write", "0000", True, zeros, 0, True, block_size=block_size)
         files = worker_files(d)
-        assert [len(data) for data in files] == [8292, 8292]
+        assert [len(data) for data in files] == [file_size, file_size]
         assert all_unique(*files)
 
 
@@ -91,12 +95,109 @@ def test_stamp_unique_numbers_blocks_from_first_block(iotest_mod, monkeypatch):
         assert bytes(part) == bytes(whole[2 * 512:])
 
 
-def test_without_unique_a_chunked_file_repeats_its_block(run_main, work_dir):
-    # what the README warns about: deduplicating storage may keep one copy of the block
-    run_main(["write"], file_size=8192, zeros=False, block_size=1024)
+def compression_ratio(data):
+    return len(data) / len(zlib.compress(data, 1))
+
+
+@pytest.mark.parametrize("unique", [False, True])
+def test_a_chunked_file_does_not_compress(run_main, work_dir, unique):
+    # chunks come from a pool of random data, not one block written again and again, which compressing storage
+    # would store in a fraction of the bytes; a file the pool holds is the pool itself
+    run_main(["write"], file_size=256 * KiB, zeros=False, unique=unique, block_size=4 * KiB)
     data = worker_files(work_dir, 1)[0]
-    assert len(data) == 8192
-    assert data == data[:1024] * 8
+    assert len(data) == 256 * KiB
+    assert compression_ratio(data) < 1.1
+
+
+LZMA_FILTERS = [{"id": 33, "preset": 0, "dict_size": 4 * MiB}]  # 33: lzma.FILTER_LZMA2
+
+
+def lzma_size(lzma, data):
+    return len(lzma.compress(data, format=lzma.FORMAT_RAW, filters=LZMA_FILTERS))
+
+
+@pytest.mark.parametrize("unique", [False, True])
+@pytest.mark.parametrize("block_size", [4 * KiB, 1000, 128 * KiB, 1 * MiB])
+def test_no_mib_of_a_file_larger_than_the_pool_compresses(iotest_mod, tmp_path, unique, block_size):
+    # storage compresses records of up to about 1 MiB (ZFS recordsize, btrfs 128 KiB extents, arrays), so no
+    # chunk may repeat the bytes of another within any 1 MiB of the file, aligned or not. LZMA with a dictionary
+    # larger than the window finds any repeat in it. -u's tags compress a little whatever the block size, so the
+    # file written whole is the reference
+    lzma = pytest.importorskip("lzma")
+    file_size = 4 * MiB
+    assert iotest_mod.content_size(file_size, block_size) < file_size
+    data = {}
+    for bs in (None, block_size):
+        d = tmp_path / str(bs)
+        iotest_mod.worker(1, file_size, str(d), [], "write", "0000", True, False, 0, unique, block_size=bs)
+        data[bs] = (d / "0000" / "temp_1.bin").read_bytes()
+        assert len(data[bs]) == file_size
+    for start in (0, 1 * MiB, 1536 * KiB + 777, 3 * MiB):
+        whole, chunked = (lzma_size(lzma, data[bs][start:start + MiB]) for bs in (None, block_size))
+        assert chunked > 0.995 * whole, start
+
+
+def test_lzma_finds_a_chunk_repeated_a_mib_apart():
+    # the check above would see a chunk that repeats an earlier one, even shifted by a few bytes
+    lzma = pytest.importorskip("lzma")
+    pool = os.urandom(MiB)
+    window = pool[:7 * 128 * KiB] + pool[3:128 * KiB + 3]
+    assert lzma_size(lzma, window) < 0.9 * lzma_size(lzma, pool)
+
+
+@pytest.mark.parametrize("file_size,block_size,pool", [
+    # a file the pool would hold is held whole, so it is the pool itself
+    (256 * KiB, 4 * KiB, 256 * KiB),
+    # 1 MiB of chunk starts and one block
+    (8 * MiB, 4 * KiB, MiB + 4 * KiB),
+    (8 * MiB, 3 * MiB, 4 * MiB),
+    (8 * MiB, None, 8 * MiB),
+])
+def test_content_size(iotest_mod, file_size, block_size, pool):
+    assert iotest_mod.content_size(file_size, block_size) == pool
+
+
+def pool_starts(pool, chunks):
+    # where in the pool each chunk's view starts
+    base = ctypes.addressof(ctypes.c_char.from_buffer(pool))
+    return [ctypes.addressof(ctypes.c_char.from_buffer(chunk)) - base for _, chunk in chunks]
+
+
+@pytest.mark.parametrize("stamped", [False, True])
+@pytest.mark.parametrize("block_size", [7, 512, 1000, 4 * KiB, 128 * KiB, MiB, 3 * MiB])
+def test_a_pool_byte_comes_back_in_the_file_only_a_mib_or_more_later(iotest_mod, block_size, stamped):
+    file_size = 3 * iotest_mod.content_size(8 * MiB, block_size) + 100
+    pool = bytearray(iotest_mod.content_size(file_size, block_size))
+    chunks = list(iotest_mod.file_chunks(pool, file_size, block_size, stamped=stamped))
+    assert [offset for offset, _ in chunks] == list(range(0, file_size, block_size))
+    assert [len(chunk) for _, chunk in chunks] == [min(block_size, file_size - offset) for offset, _ in chunks]
+    # each chunk starts at its offset in the file modulo the span: file bytes that share a pool byte are a
+    # multiple of the span apart, and no chunk runs off the pool
+    span = iotest_mod.chunk_span(len(pool), block_size, file_size, stamped)
+    assert pool_starts(pool, chunks) == [offset % span for offset, _ in chunks]
+    assert iotest_mod.CHUNK_POOL_SIZE <= span <= len(pool) - block_size + 1
+    if stamped:
+        # -u tags land on the same bytes of the pool whichever chunk stamps them
+        assert span % 512 == 0
+    else:
+        # each round of the pool sits at another place in the file's 512-byte blocks
+        assert span % 2 == 1
+
+
+def test_a_one_block_buffer_gives_every_chunk_from_its_start(iotest_mod):
+    for stamped in (False, True):
+        block = bytearray(1000)
+        chunks = list(iotest_mod.file_chunks(block, 2500, 1000, stamped=stamped))
+        assert [offset for offset, _ in chunks] == [0, 1000, 2000]
+        assert pool_starts(block, chunks) == [0, 0, 0]
+        assert [len(chunk) for _, chunk in chunks] == [1000, 1000, 500]
+
+
+def test_a_buffer_that_holds_the_file_gives_each_chunk_from_its_own_place(iotest_mod):
+    pool = bytearray(2500)
+    chunks = list(iotest_mod.file_chunks(pool, 2500, 1000))
+    assert pool_starts(pool, chunks) == [0, 1000, 2000]
+    assert [len(chunk) for _, chunk in chunks] == [1000, 1000, 500]
 
 
 def spy_calls(monkeypatch, iotest_mod, name, real, sizes):
@@ -215,31 +316,34 @@ def test_whole_file_stamping_stays_before_the_timed_write(iotest_mod, tmp_path, 
 
 
 @pytest.mark.parametrize("mode", ["write", "read", "random", "comprehensive"])
-def test_workers_hold_block_sized_buffers(iotest_mod, work_dir, mode):
+def test_workers_hold_a_chunk_pool_and_block_sized_read_buffers(iotest_mod, work_dir, mode):
     if mode == "read":
-        iotest_mod.worker(2, 4 * MiB, str(work_dir), [], "write", "0", True, True, 0)
+        iotest_mod.worker(2, 8 * MiB, str(work_dir), [], "write", "0", True, True, 0)
     results = []
-    # a whole-file buffer alone would be 4 MiB (comprehensive and random hold two)
-    peak = traced_peak(iotest_mod.worker, 2, 4 * MiB, str(work_dir), results, mode, "0", True, False, 0,
+    # a whole-file buffer alone would be 8 MiB (comprehensive and random hold two); the chunk pool is 1 MiB and one
+    # block, and making it briefly takes up to twice as much again
+    peak = traced_peak(iotest_mod.worker, 2, 8 * MiB, str(work_dir), results, mode, "0", True, False, 0,
         block_size=64 * KiB)
     samples = worker_samples(iotest_mod, results)
     assert len(samples) == (8 if mode == "comprehensive" else 2)
     assert not [s for s in samples if isinstance(s, str)]
-    assert peak < 1 * MiB
+    assert peak < (1 if mode == "read" else 4) * MiB
 
 
-def test_simultaneous_and_layout_workers_hold_block_sized_buffers(iotest_mod, work_dir):
-    peaks = [traced_peak(iotest_mod.layout_read_worker, 2, 4 * MiB, str(work_dir), "t", "0", True, False,
+def test_simultaneous_and_layout_workers_hold_a_chunk_pool_or_a_block_sized_read_buffer(iotest_mod, work_dir):
+    peaks = [traced_peak(iotest_mod.layout_read_worker, 2, 8 * MiB, str(work_dir), "t", "0", True, False,
         block_size=64 * KiB)]
     for role in ("write", "read"):
         results = []
-        peaks.append(traced_peak(iotest_mod.simultaneous_role_worker, role, 2, 4 * MiB, str(work_dir), "t", "0",
+        peaks.append(traced_peak(iotest_mod.simultaneous_role_worker, role, 2, 8 * MiB, str(work_dir), "t", "0",
             results, True, False, 0, block_size=64 * KiB))
         samples = worker_samples(iotest_mod, results)
         assert len(samples) == 2 and not [s for s in samples if isinstance(s, str)]
-    assert all(peak < 1 * MiB for peak in peaks), peaks
+    # the layout worker and the writer hold a chunk pool (see above), the reader a block
+    assert all(peak < 4 * MiB for peak in peaks), peaks
+    assert peaks[2] < 1 * MiB
     worker_dir = work_dir / ".iotest_simul_t" / "worker_0"
-    assert sorted(p.stat().st_size for p in worker_dir.iterdir()) == [4 * MiB] * 4
+    assert sorted(p.stat().st_size for p in worker_dir.iterdir()) == [8 * MiB] * 4
 
 
 @pytest.mark.parametrize("modes", [["write", "read"], ["random"], ["comprehensive"], ["simultaneous"]])
@@ -273,14 +377,23 @@ def test_chunked_read_recreates_missing_files_whole_and_unique(run_main, iotest_
     assert all_unique(*files)
 
 
-@pytest.mark.parametrize("block_size,expected_pc", [(1024, 4), (None, 1), (8192, 1), (16384, 1)])
+@pytest.mark.parametrize("block_size,expected_pc", [(1024, 4), (None, 1), (8 * MiB, 1), (16 * MiB, 1)])
 def test_memory_estimate_uses_the_buffer_size(run_main, iotest_mod, monkeypatch, block_size, expected_pc):
-    # 6000 B available: 4 workers x 1 KiB x 1.2 = 4915 B fit; one whole 8 KiB file per worker
-    # (9830 B) does not, so without a smaller block the count drops to the minimum of 1
+    # 6 MiB available: 4 workers x (1 MiB + 2 KiB chunk pool) x 1.2 = 4.8 MiB fit; one whole 8 MiB file per worker
+    # (9.6 MiB) does not, so without a smaller block the count drops to the minimum of 1
     monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
-    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (6000, 0))
-    result = run_main(["write"], process_count=4, file_size=8192, block_size=block_size)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (6 * MiB, 0))
+    result = run_main(["write"], process_count=4, file_size=8 * MiB, block_size=block_size)
     assert result["process_count"] == expected_pc
+
+
+def test_memory_estimate_counts_the_chunk_pool_and_the_block_sized_read_buffer(iotest_mod):
+    pool = iotest_mod.content_size(64 * MiB, 4 * KiB)
+    per_process = functools.partial(iotest_mod.memory_per_process, file_count=0, read_size=4 * KiB)
+    assert per_process(["write"], pool) == pytest.approx(pool * 1.2)
+    assert per_process(["read"], pool) == pytest.approx(4 * KiB * 1.2)
+    assert per_process(["random"], pool) == pytest.approx((pool + 4 * KiB) * 1.2)
+    assert per_process(["read"], pool, read_recreates=True) == pytest.approx((pool + 4 * KiB) * 1.2)
 
 
 class InlineProcess:
@@ -297,9 +410,10 @@ class InlineProcess:
         pass
 
 
-@pytest.mark.parametrize("block_size,size_text,gen_time", [
-    (1024, "1.00 KiB blocks", "0.0010 s"), (None, "8.00 KiB files", "0.0080 s"), (16384, "8.00 KiB files", "0.0080 s")])
-def test_generation_benchmark_uses_the_buffer_size(run_main, iotest_mod, rec_tl, monkeypatch, block_size, size_text, gen_time):
+@pytest.mark.parametrize("file_size,block_size,size,size_text", [
+    (8192, 1024, 8192, "8.00 KiB chunk pools"), (4 * MiB, 1024, MiB + 1024, "1.00 MiB chunk pools"),
+    (8192, None, 8192, "8.00 KiB files"), (8192, 16384, 8192, "8.00 KiB files")])
+def test_generation_benchmark_uses_the_buffer_size(run_main, iotest_mod, rec_tl, monkeypatch, file_size, block_size, size, size_text):
     # at 1024000 B/s, each worker's estimated generation time is its buffer size / 1024000
     def fake_benchmark(file_size, file_count, zeros, results, timeout=5):
         sizes.append(file_size)
@@ -313,10 +427,10 @@ def test_generation_benchmark_uses_the_buffer_size(run_main, iotest_mod, rec_tl,
     sizes = []
     monkeypatch.setattr(iotest_mod, "benchmarkGenSpeed", fake_benchmark)
     monkeypatch.setattr(iotest_mod, "Process", process)
-    run_main(["write"], file_size=8192, block_size=block_size, tl=rec_tl)
-    assert sizes == [1024 if block_size == 1024 else 8192]
+    run_main(["write"], file_size=file_size, block_size=block_size, tl=rec_tl)
+    assert sizes == [size]
     assert any(size_text in line for line in rec_tl.printed)
-    assert f"Gen time calculated:   \t{gen_time}" in rec_tl.printed
+    assert f"Gen time calculated:   \t{size / 1024000:.4f} s" in rec_tl.printed
 
 
 def test_block_size_at_least_the_file_size_is_unset(iotest_mod):
@@ -348,13 +462,24 @@ def test_block_size_at_least_the_file_size_makes_the_same_calls_as_unset(run_mai
     assert calls[None] == calls[block_size] == ["read 4096"] * 2 + ["write 4096"] * 2
 
 
-def test_tuning_runs_keep_the_block_size(iotest_mod, work_dir, rec_tl, tiny):
+@pytest.mark.patches_workers
+@pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
+def test_tuning_runs_keep_the_block_size(iotest_mod, work_dir, rec_tl, tiny, monkeypatch, tmp_path):
+    log = tmp_path / "writes.txt"
+
+    def logged(fd, buffers):
+        # workers are forked, so they log to a file
+        with open(str(log), "a") as f:
+            f.write(f"{len(buffers[0])}\n")
+        return REAL_WRITEV(fd, buffers)
+
+    monkeypatch.setattr(iotest_mod.os, "writev", logged)
     # pc=1 with a 1 B/s target: one tuning attempt, accepted as best effort
     options = iotest_mod.RunOptions(file_size=8192, file_count=1, process_count=1, directories=str(work_dir),
         modes=["write"], zeros=False, no_report=True, benchmark_time=tiny["benchmarkTime"], block_size=1024)
     iotest_mod.tune_for_targets(options, rec_tl, 1, None)
-    data = worker_files(work_dir, 1)[0]
-    assert data == data[:1024] * 8
+    assert log.read_text().split() == ["1024"] * 8
+    assert len(worker_files(work_dir, 1)[0]) == 8192
 
 
 def test_simultaneous_tuning_lays_out_with_the_block_size(iotest_mod, work_dir, rec_tl, monkeypatch):
