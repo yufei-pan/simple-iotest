@@ -250,3 +250,37 @@ def test_collect_timeline_fetches_once_and_empties_the_manager_list(iotest_mod):
     assert proxy == []
     # without --timeline there is no list to fetch
     iotest_mod.collect_timeline(None, None, 2, "write")
+
+
+class FailingSink:
+    def append(self, record):
+        raise OSError("timeline hand-over failed")
+
+
+@pytest.mark.parametrize("role", [None, "write", "read"])
+def test_a_failed_timeline_hand_over_comes_before_the_results(iotest_mod, work_dir, role):
+    # the parent counts every op of a worker that exits non-zero as failed, so its results must not have arrived
+    results = []
+    with pytest.raises(OSError, match="hand-over"):
+        if role is None:
+            iotest_mod.worker(3, 1024, str(work_dir), results, "write", "0000", True, True, 0, timeline=FailingSink())
+        else:
+            iotest_mod.layout_read_worker(3, 1024, str(work_dir), "t", "0000", True, True)
+            iotest_mod.simultaneous_role_worker(role, 3, 1024, str(work_dir), "t", "0000", results, True, True, 0,
+                timeline=FailingSink())
+    assert results == []
+
+
+@pytest.mark.patches_workers
+@pytest.mark.parametrize("modes,keys", [(["write"], ["write"]), (["simultaneous"], ["write", "read"])])
+def test_a_worker_whose_timeline_fails_counts_its_ops_failed_once(iotest_mod, run_main, rec_tl, monkeypatch, modes, keys):
+    def failing_record(self):
+        raise OSError("timeline hand-over failed")
+
+    monkeypatch.setattr(iotest_mod.OpTimeline, "record", failing_record)
+    result = run_main(modes, process_count=2, file_count=3, timeline=True, tl=rec_tl)
+    for key in keys:
+        # no successes beside the failures: each worker's file_count ops, once
+        assert result["outResults"][key] == []
+        workers = 2 if modes == ["write"] else 1
+        assert result["failedOps"][key] == ["worker process exited with code 1 before reporting results"] * 3 * workers

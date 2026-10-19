@@ -916,10 +916,11 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 	if mode == 'meta_unlink':
 		remove_meta_dir(meta_dir)
 	log(f'Worker {counter} finished.')
-	results.append(results_record(local_results, local_kinds))
 	if local_timeline is not None:
-		# one record per worker and pass, so the manager sees one append, not one per op
+		# one record per worker and pass, so the manager sees one append, not one per op. Before the results:
+		# a worker that fails after its results arrived would also count as dead, every op failed on top
 		timeline.append(local_timeline.record())
+	results.append(results_record(local_results, local_kinds))
 
 # worker directories are named by the counter at this width whatever the process count, so a run at another
 # count uses the same workers' files: a smaller count is the first workers of a larger one
@@ -1172,10 +1173,11 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 			if not quiet:
 				log(f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tRead\t{format_op(op)}")
 	log(f'Worker {counter} ({role}) finished.')
-	results.append(results_record(local_results))
 	if local_timeline is not None:
-		# one record per worker and pass, so the manager sees one append, not one per op
+		# one record per worker and pass, so the manager sees one append, not one per op. Before the results,
+		# as in worker(): results that arrived must not also count as a dead worker's failed ops
 		timeline.append(local_timeline.record())
+	results.append(results_record(local_results))
 
 def cleanup_simultaneous_tree(directories, run_id):
 	# the run's tree in each directory that has one
