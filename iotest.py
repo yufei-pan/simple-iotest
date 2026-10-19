@@ -881,13 +881,29 @@ def existing_size(path):
 		return 0
 	return st.st_size if stat.S_ISREG(st.st_mode) else 0
 
+def scan_worker_files(directories, process_count, file_count, file_size):
+	# the plain workers' temp files as the run finds them, one os.stat per file: per worker, in counter order,
+	# (bytes its files hold, how many of them are missing or not file_size bytes). Names do not depend on the
+	# process count, so the first n entries describe a run at n workers
+	scan = []
+	for directory, counter_name in worker_dirs(directories, process_count):
+		existing = wrong = 0
+		for index in range(file_count):
+			size = existing_size(worker_file_path(directory, counter_name, index, file_count))
+			existing += size
+			if size != file_size:
+				wrong += 1
+		scan.append((existing, wrong))
+	return scan
+
 FREE_SPACE_MARGIN = 0.95
 
 COPY_ON_WRITE_FILESYSTEMS = ('btrfs', 'zfs')
 
 def space_needed(modes, file_size, file_count, process_count, directories,
-		simultaneous_write_count=None, layout_worker_count=None, skip_layout=False, mountinfo_lines=None):
-	# peak bytes each directory receives during the run
+		simultaneous_write_count=None, layout_worker_count=None, skip_layout=False, mountinfo_lines=None, scan=None):
+	# peak bytes each directory receives during the run; scan is scan_worker_files() of at least process_count
+	# workers, made here when not given
 	if mountinfo_lines is None:
 		mountinfo_lines = read_mountinfo()
 	# needed assumes a rewrite frees the old file first; cow_extra is what copy-on-write
@@ -899,14 +915,17 @@ def space_needed(modes, file_size, file_count, process_count, directories,
 		# these files stay; read only recreates a missing or wrong-size file, at full size
 		cow = {d: (find_mount(os.path.realpath(d), mountinfo_lines) or ('',))[0] in COPY_ON_WRITE_FILESYSTEMS
 			for d in directories}
-		for directory, _, path in worker_files(directories, process_count, file_count):
-			existing = existing_size(path)
+		if scan is None:
+			scan = scan_worker_files(directories, process_count, file_count, file_size)
+		for counter in range(process_count):
+			directory = directories[counter % len(directories)]
+			existing, wrong = scan[counter]
 			if rewrites:
-				needed[directory] += file_size - existing
+				needed[directory] += file_size * file_count - existing
 				if cow[directory]:
 					cow_extra[directory] += existing
-			elif existing != file_size:
-				needed[directory] += file_size
+			else:
+				needed[directory] += file_size * wrong
 	# comprehensive deletes each file after reading it and simultaneous removes its
 	# tree when done, so only the larger of the two is ever on disk at once
 	transient = {d: 0 for d in directories}
@@ -1307,15 +1326,29 @@ def send_short_reports(message_end_point_address, short_reports, tl):
 			tl.teeerror(f"Failed to send short report to {host}: {e}{skipped_note}")
 			return
 
-def read_recreates_files(modes, directories, process_count, file_count, file_size):
-	# a read pass needs file content only to recreate missing or wrong-size files, and
-	# not for files an earlier write/random pass of this run creates first
-	if 'read' not in modes:
-		return False
-	if any(mode in ('write', 'random') for mode in modes[:modes.index('read')]):
-		return False
-	return any(file_needs_recreate(path, file_size)
-		for _, _, path in worker_files(directories, process_count, file_count))
+def files_left_before(modes, index):
+	# what the passes before modes[index] leave of the plain workers' temp files: True after a write, random or
+	# read pass (each writes every file it does not find), False after a comprehensive pass (it renames and
+	# deletes every file), None when no pass touched them, so they are as the run found them
+	for mode in reversed(modes[:index]):
+		if mode in ('write', 'random', 'read'):
+			return True
+		if mode == 'comprehensive':
+			return False
+	return None
+
+def read_pass_recreates(modes, scan, process_count):
+	# {index in modes of each read pass: per worker, whether it has files to recreate in that pass}. A worker
+	# that does makes its file content before the start barrier, and the memory estimate counts it
+	passes = {}
+	for index, mode in enumerate(modes):
+		if mode == 'read':
+			left = files_left_before(modes, index)
+			if left is None:
+				passes[index] = [wrong > 0 for _, wrong in scan[:process_count]]
+			else:
+				passes[index] = [not left] * process_count
+	return passes
 
 def memory_copies(modes, read_recreates=False):
 	# each worker holds one buffer: its file content (writers) or its read buffer (readers,
@@ -1354,6 +1387,20 @@ def memory_per_process(modes, buffer_size, file_count, read_recreates=False, tim
 	op_bytes = sum(OPS_PER_FILE.get(mode, 0) * (RESULT_BYTES_PER_OP.get(mode, 0)
 		+ (TIMELINE_BYTES_PER_OP.get(mode, 0) if timeline else 0)) for mode in modes)
 	return buffer_size * memory_copies(modes, read_recreates) * 1.2 + file_count * op_bytes
+
+def workers_memory(modes, buffer_size, file_count, recreates, timeline=False):
+	# memory_per_process() of each worker, in counter order, by whether it recreates files in a read pass
+	figures = [memory_per_process(modes, buffer_size, file_count, flag, timeline) for flag in (False, True)]
+	return [figures[1 if flag else 0] for flag in recreates]
+
+def fitting_process_count(worker_memory, available):
+	# how many of the first workers fit in the available memory together, at least one
+	total = 0
+	for count, memory in enumerate(worker_memory):
+		total += memory
+		if total > available:
+			return max(count, 1)
+	return len(worker_memory)
 
 def read_meminfo():
 	# (MemAvailable, SwapFree) in bytes, -1 when unknown
@@ -1666,9 +1713,15 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	sync_estimated = {}
 	totalTime = {}
 	mode_process_counts = {}
-	read_recreates = read_recreates_files(modes, directories, process_count, file_count, file_size)
-	memoryPerProcess = memory_per_process(modes, buffer_size, file_count, read_recreates, options.timeline)
-	estimatedTotalMemory = memoryPerProcess * process_count
+	scan = None
+	if any(mode in ('write', 'random', 'read') for mode in modes):
+		# one os.stat per temp file, for the free-space check and for which read workers recreate files
+		scan = scan_worker_files(directories, process_count, file_count, file_size)
+	recreate_passes = read_pass_recreates(modes, scan, process_count)
+	# per worker: whether it recreates files in some read pass, and so holds a second buffer
+	recreating = [any(flags[counter] for flags in recreate_passes.values()) for counter in range(process_count)]
+	worker_memory = workers_memory(modes, buffer_size, file_count, recreating, options.timeline)
+	estimatedTotalMemory = sum(worker_memory)
 	if modes == ['benchmark']:
 		file_count = 0
 	try:
@@ -1682,17 +1735,18 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		tl.teeerror(f"Physical available memory: {format_bytes(phyFreeMemory)}B")
 		tl.teeerror(f"Swap available memory: {format_bytes(swapMemory)}B")
 		tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
-		process_count = max(int((phyFreeMemory + swapMemory) // memoryPerProcess), 1)
+		# the first workers that fit: a smaller count runs the same first workers, on the same files
+		process_count = fitting_process_count(worker_memory, phyFreeMemory + swapMemory)
 		tl.teeerror(f"Reducing the number of processes to {process_count}")
 	if 'simultaneous' in modes and simultaneous_write_count is not None and simultaneous_write_count > process_count - 1 >= 1:
 		# the memory check may have cut process_count below the requested split
 		tl.teelog(f"Reducing simultaneous writers from {simultaneous_write_count} to {process_count - 1} to keep a reader", level='warning')
 		simultaneous_write_count = process_count - 1
-	estimatedTotalMemory = memoryPerProcess * process_count
+	estimatedTotalMemory = sum(worker_memory[:process_count])
 	# the disk check needs the final process_count, but runs before the 16 s memory pause
 	needed, cow_extra = space_needed(modes, file_size, file_count, process_count, directories,
 		simultaneous_write_count=simultaneous_write_count, layout_worker_count=simultaneous_layout_workers,
-		skip_layout=simultaneous_skip_layout, mountinfo_lines=mountinfo)
+		skip_layout=simultaneous_skip_layout, mountinfo_lines=mountinfo, scan=scan)
 	if not check_free_space(needed, tl, mountinfo, cow_extra=None if tuning_attempt else cow_extra):
 		sys.exit(1)
 	# recorded before any worker writes, so -cl after tuning also covers an attempt that
@@ -1730,7 +1784,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			genTimeCalc = 0
 			processStartDelay = 0.005 * process_count + 1
 			tl.teeprint("Skipping file generation benchmark (no write workers in simultaneous mode)")
-		elif all(mode in ('read', 'index', 'meta') for mode in modes) and not read_recreates:
+		elif all(mode in ('read', 'index', 'meta') for mode in modes) and not any(recreating[:process_count]):
 			# it estimates how long workers take to generate data before the start barrier
 			genSpeed = 0
 			genTimeCalc = 0
@@ -1772,14 +1826,14 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			tl.teeprint(f"Gen time calculated:   \t{genTimeCalc:.4f} s")
 			tl.teeprint(f"Process start delay:   \t{processStartDelay:.4f} s")
 		sync_start_at = options.start_at
-		# a meta run is three passes with their own barriers
+		# a meta run is three passes with their own barriers; a read pass carries which workers recreate files
 		pass_modes = []
-		for mode in modes:
+		for index, mode in enumerate(modes):
 			if mode == 'meta':
-				pass_modes.extend('meta_' + phase for phase in META_PHASES)
+				pass_modes.extend(('meta_' + phase, None) for phase in META_PHASES)
 			else:
-				pass_modes.append(mode)
-		for mode in pass_modes:
+				pass_modes.append((mode, recreate_passes.get(index)))
+		for mode, pass_recreates in pass_modes:
 			if mode == 'benchmark':
 				continue
 			pass_index += 1
@@ -1866,8 +1920,9 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				thread_start_time = time.perf_counter() + processStartDelay
 			for counter in range(process_count):
 				assigned_directory = directories[counter % len(directories)]
+				recreates = pass_recreates is not None and pass_recreates[counter]
 				counter = worker_counter_name(counter)
-				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, read_recreates, late, json_to_stdout, pass_timeline, block_size, verify))
+				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, recreates, late, json_to_stdout, pass_timeline, block_size, verify))
 				processes.append(p)
 			totalStartTime = thread_start_time
 			start_processes(processes)

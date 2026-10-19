@@ -109,19 +109,29 @@ def test_memory_copies_per_mode(iotest_mod, modes, read_recreates, copies):
 
 
 @pytest.mark.parametrize(
-    "modes,prepared,expected",
+    "modes,expected",
     [
-        (["read"], True, False),            # every file is there at full size
-        (["read"], False, True),            # fresh directory: read recreates them
-        (["write", "read"], False, False),  # the write pass creates them first
-        (["read", "write"], False, True),   # ...but not when it runs after the read
-        (["write"], False, False),
+        # as found: worker 1 has a missing or wrong-size file
+        (["read"], {0: [False, True, False]}),
+        # the write pass creates the files first...
+        (["write", "read"], {1: [False] * 3}),
+        # ...but not when it runs after the read
+        (["read", "write"], {0: [False, True, False]}),
+        # a comprehensive pass renames and deletes every file, and the last pass before a read decides
+        (["comprehensive", "read"], {1: [True] * 3}),
+        (["write", "comprehensive", "read"], {2: [True] * 3}),
+        (["comprehensive", "write", "read"], {2: [False] * 3}),
+        (["random", "read"], {1: [False] * 3}),
+        # a read pass recreates what it does not find, so a later one finds everything
+        (["read", "read"], {0: [False, True, False], 1: [False] * 3}),
+        (["read", "comprehensive", "read"], {0: [False, True, False], 2: [True] * 3}),
+        (["index", "meta", "read"], {2: [False, True, False]}),
+        (["write"], {}),
     ],
 )
-def test_read_recreates_files(iotest_mod, work_dir, run_main, modes, prepared, expected):
-    if prepared:
-        run_main(["write"], process_count=2, file_count=2)
-    assert iotest_mod.read_recreates_files(modes, [str(work_dir)], 2, 2, 1024) == expected
+def test_read_pass_recreates(iotest_mod, modes, expected):
+    scan = [(1024, 0), (0, 1), (1024, 0), (0, 1)]
+    assert iotest_mod.read_pass_recreates(modes, scan, 3) == expected
 
 
 @pytest.mark.parametrize("prepared", [True, False])
@@ -300,3 +310,122 @@ def test_memory_guard_counts_the_ops_of_a_meta_run(run_main, iotest_mod, monkeyp
     assert result["process_count"] == 2
     assert f"Estimated total memory usage: {iotest_mod.format_bytes(4 * per_process)}B" in rec_tl.printed
     assert "Reducing the number of processes to 2" in rec_tl.printed
+
+
+def spy_worker_args(iotest_mod, monkeypatch):
+    # the arguments of every plain worker started, by pass: (mode, counter name, recreates)
+    seen = []
+    real = iotest_mod.Process
+
+    def process(target, args):
+        if target is iotest_mod.worker:
+            seen.append((args[4], args[5], args[10]))
+        return real(target=target, args=args)
+
+    monkeypatch.setattr(iotest_mod, "Process", process)
+    return seen
+
+
+def read_recreates_by_worker(seen):
+    return [recreates for mode, _, recreates in seen if mode == "read"]
+
+
+@pytest.mark.parametrize(
+    "modes,recreates",
+    [
+        # a comprehensive pass renames and deletes every file it writes
+        (["comprehensive", "read"], True),
+        (["write", "comprehensive", "read"], True),
+        # the last pass before the read decides
+        (["comprehensive", "write", "read"], False),
+        (["write", "read"], False),
+    ],
+)
+def test_read_after_comprehensive_prepares_content_before_the_barrier(run_main, iotest_mod, work_dir, monkeypatch,
+                                                                       modes, recreates):
+    seen = spy_worker_args(iotest_mod, monkeypatch)
+    result = run_main(modes, process_count=2, file_count=2)
+    assert iotest_mod.total_failed_ops(result) == 0
+    assert read_recreates_by_worker(seen) == [recreates, recreates]
+    assert len(list(work_dir.rglob("temp_*.bin"))) == 4
+
+
+def test_only_workers_with_missing_or_wrong_size_files_recreate(run_main, iotest_mod, work_dir, monkeypatch):
+    run_main(["write"], process_count=4, file_count=2)
+    (work_dir / "0001" / "temp_2.bin").unlink()
+    (work_dir / "0003" / "temp_1.bin").write_bytes(b"short")
+    seen = spy_worker_args(iotest_mod, monkeypatch)
+    result = run_main(["read"], process_count=4, file_count=2)
+    assert iotest_mod.total_failed_ops(result) == 0
+    assert read_recreates_by_worker(seen) == [False, True, False, True]
+
+
+def test_memory_estimate_counts_a_second_buffer_only_for_recreating_workers(run_main, iotest_mod, work_dir,
+                                                                             monkeypatch, rec_tl):
+    run_main(["write"], process_count=3)
+    (work_dir / "0001" / "temp_1.bin").unlink()
+    read_only = iotest_mod.memory_per_process(["read"], 1024, 1)
+    recreating = iotest_mod.memory_per_process(["read"], 1024, 1, read_recreates=True)
+    estimate = 2 * read_only + recreating
+    # just the estimate in RAM: under 90 % of it would warn (and pause, skipped here) without cutting the count
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (int(estimate) + 1, 0))
+    result = run_main(["read"], process_count=3, tl=rec_tl)
+    assert result["process_count"] == 3
+    assert f"Estimated total memory usage: {iotest_mod.format_bytes(estimate)}B" in rec_tl.printed
+
+
+def test_memory_cut_counts_the_first_workers_that_fit(run_main, iotest_mod, work_dir, monkeypatch):
+    # worker 0000's files are missing: it needs room for two buffers, the others for one
+    run_main(["write"], process_count=4)
+    (work_dir / "0000" / "temp_1.bin").unlink()
+    read_only = iotest_mod.memory_per_process(["read"], 1024, 1)
+    recreating = iotest_mod.memory_per_process(["read"], 1024, 1, read_recreates=True)
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (int(recreating + 2 * read_only) + 1, 0))
+    assert run_main(["read"], process_count=4)["process_count"] == 3
+
+
+def test_fitting_process_count(iotest_mod):
+    fit = iotest_mod.fitting_process_count
+    assert fit([2, 1, 1, 1], 4) == 3
+    assert fit([2, 1, 1, 1], 5) == 4
+    assert fit([2, 1, 1, 1], 1) == 1
+    assert fit([3, 3, 3], 8.9) == 2
+
+
+def test_startup_stats_every_worker_file_once(run_main, iotest_mod, work_dir, monkeypatch):
+    # isfile + getsize for the recreate check and two more for the free-space check used to be four per file,
+    # and a memory cut walked them again
+    run_main(["write"], process_count=3, file_count=4)
+    stats = []
+    real = os.stat
+
+    def spy(path, *args, **kwargs):
+        if isinstance(path, str) and os.path.basename(path).startswith("temp_"):
+            stats.append(path)
+        return real(path, *args, **kwargs)
+
+    per_worker = iotest_mod.memory_per_process(["read", "write"], 1024, 4)
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (int(2 * per_worker) + 1, 0))
+    monkeypatch.setattr(iotest_mod.os, "stat", spy)
+    result = run_main(["read", "write"], process_count=3, file_count=4)
+    monkeypatch.setattr(iotest_mod.os, "stat", real)
+    assert result["process_count"] == 2
+    assert len(stats) == 12
+    assert len(set(stats)) == 12
+
+
+def test_scan_worker_files(iotest_mod, work_dir):
+    dirs = [str(work_dir / "a"), str(work_dir / "b")]
+    for _, _, path in iotest_mod.worker_files(dirs, 3, 2):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"x" * 100)
+    os.remove(iotest_mod.worker_file_path(dirs[1], "0001", 0, 2))
+    with open(iotest_mod.worker_file_path(dirs[0], "0002", 1, 2), "wb") as f:
+        f.write(b"x" * 30)
+    # a directory where a file belongs holds no bytes and is not the file
+    os.makedirs(iotest_mod.worker_file_path(dirs[1], "0003", 0, 2))
+    assert iotest_mod.scan_worker_files(dirs, 4, 2, 100) == [(200, 0), (100, 1), (130, 1), (0, 2)]
