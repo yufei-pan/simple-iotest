@@ -272,6 +272,10 @@ def almost_urandom(n):
 
 UNIQUE_STAMP_INTERVAL = 512
 UNIQUE_TAG = struct.Struct('<QQQ')
+# numpy stamps a buffer in one call but takes about 2 µs to set it up, the struct loop about 0.04 µs a block: numpy
+# is faster from about 56 blocks (measured with numpy 2 on Python 3.13), so smaller -bs chunks, stamped inside the
+# timed write, use the loop
+STAMP_NUMPY_MIN_BLOCKS = 64
 
 def stamp_unique(buf, worker_id, file_index, first_block=0):
 	# Workers reuse one buffer for all their files. Overwrite the start of every
@@ -282,7 +286,7 @@ def stamp_unique(buf, worker_id, file_index, first_block=0):
 	# buf starts at block first_block of the file (with -bs it holds one chunk).
 	size = len(buf)
 	full_blocks = size // UNIQUE_STAMP_INTERVAL
-	if numpy_available and full_blocks:
+	if numpy_available and full_blocks >= STAMP_NUMPY_MIN_BLOCKS:
 		tags = np.empty((full_blocks, 3), dtype='<u8')
 		tags[:, 0] = file_index
 		tags[:, 1] = np.arange(first_block, first_block + full_blocks, dtype='<u8')

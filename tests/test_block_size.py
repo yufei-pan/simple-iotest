@@ -85,14 +85,50 @@ def test_chunk_stamps_land_where_stamping_the_whole_file_puts_them(iotest_mod, t
             assert data[start:start + tag] == bytes(whole[start:start + tag]), start
 
 
-def test_stamp_unique_numbers_blocks_from_first_block(iotest_mod, monkeypatch):
+@pytest.mark.parametrize("blocks", [4, 200])
+def test_stamp_unique_numbers_blocks_from_first_block(iotest_mod, monkeypatch, blocks):
+    # 200 blocks: numpy stamps them when it is there
     for use_numpy in stamp_paths(iotest_mod):
         monkeypatch.setattr(iotest_mod, "numpy_available", use_numpy)
-        whole = bytearray(4 * 512 + 100)
+        whole = bytearray(blocks * 512 + 100)
         iotest_mod.stamp_unique(whole, 9, 3)
-        part = bytearray(2 * 512 + 100)
+        part = bytearray((blocks - 2) * 512 + 100)
         iotest_mod.stamp_unique(memoryview(part), 9, 3, first_block=2)
         assert bytes(part) == bytes(whole[2 * 512:])
+
+
+@pytest.mark.parametrize("tail", [0, 100])
+@pytest.mark.parametrize("more", [-1, 0, 1])
+def test_numpy_and_struct_stamping_give_the_same_bytes_at_the_threshold(iotest_mod, monkeypatch, more, tail):
+    pytest.importorskip("numpy")
+    size = (iotest_mod.STAMP_NUMPY_MIN_BLOCKS + more) * 512 + tail
+    base = os.urandom(size)
+    stamped = []
+    for use_numpy in (False, True):
+        monkeypatch.setattr(iotest_mod, "numpy_available", use_numpy)
+        buf = bytearray(base)
+        iotest_mod.stamp_unique(memoryview(buf)[:size], 0x0102030405060708, 77, first_block=5)
+        stamped.append(bytes(buf))
+    assert stamped[0] == stamped[1]
+    assert stamped[0] != base
+
+
+@pytest.mark.parametrize("more,uses_numpy", [(-1, False), (0, True)])
+def test_chunks_of_fewer_blocks_than_the_threshold_are_stamped_without_numpy(iotest_mod, monkeypatch, more, uses_numpy):
+    # numpy costs more than it saves on small chunks, stamped inside the timed write
+    class NoNumpy:
+        def __getattr__(self, name):
+            raise AssertionError("numpy used")
+
+    monkeypatch.setattr(iotest_mod, "numpy_available", True)
+    monkeypatch.setattr(iotest_mod, "np", NoNumpy(), raising=False)
+    buf = bytearray((iotest_mod.STAMP_NUMPY_MIN_BLOCKS + more) * 512)
+    if uses_numpy:
+        with pytest.raises(AssertionError, match="numpy used"):
+            iotest_mod.stamp_unique(buf, 1, 2)
+    else:
+        iotest_mod.stamp_unique(buf, 1, 2)
+        assert buf[:24] == iotest_mod.UNIQUE_TAG.pack(2, 0, 1)
 
 
 def compression_ratio(data):
