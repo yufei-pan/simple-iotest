@@ -32,6 +32,34 @@ def test_report_base_name_counts_bytes_not_characters(iotest_mod):
     assert "~" in name
 
 
+# on Linux a name that is not UTF-8 reaches Python as surrogate escapes: -d $'/scratch/\xff' is '/scratch/\udcff'
+UNDECODABLE = os.fsdecode(b"\xff")
+linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux file names are bytes; others are Unicode")
+
+
+@linux_only
+@pytest.mark.parametrize("repeat", [1, 300])
+def test_report_base_name_takes_undecodable_directory_names(iotest_mod, tmp_path, repeat):
+    # 300: too long, so the directory part is cut, on whole characters
+    name = iotest_mod.report_base_name(["write"], ["/scratch/" + UNDECODABLE * repeat], 1024, 2, 3, "20260101")
+    longest = max(len(os.fsencode(s)) for s in iotest_mod.REPORT_SUFFIXES)
+    assert len(os.fsencode(name)) + longest <= 255
+    assert UNDECODABLE in name
+    assert ("~" in name) == (repeat > 1)
+    for suffix in iotest_mod.REPORT_SUFFIXES:
+        with open(str(tmp_path / (name + suffix)), "w") as f:
+            f.write("ok")
+    assert len(list(tmp_path.iterdir())) == len(iotest_mod.REPORT_SUFFIXES)
+
+
+@linux_only
+def test_an_undecodable_directory_gets_its_result_files(run_main, rec_tl, tmp_path):
+    d = tmp_path / ("data" + UNDECODABLE)
+    result = run_main(["write"], directory=str(d), tl=rec_tl, no_report=False, timeline=True)
+    assert result["report_errors"] == []
+    assert len(list(d.glob("iotest_*"))) == 3
+
+
 def test_long_directories_still_write_result_files(run_main, rec_tl, tmp_path):
     dirs = []
     for i in range(4):

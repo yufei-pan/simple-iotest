@@ -1580,17 +1580,20 @@ def report_base_name(modes, directories, file_size, file_count, process_count, c
 	dir_str_repr = "_".join([d.replace('/','-').replace('\\','-').replace(':','-').replace('--','-').replace(' ','_') for d in directories])
 	head = f"iotest_{'-'.join(modes)}_"
 	tail = f"_fs={file_size}_fc={file_count}_pc={process_count}_{current_date_time}"
-	# file names are limited to 255 bytes, so only the directory part may shrink
-	room = 255 - max(len(suffix.encode('utf-8')) for suffix in REPORT_SUFFIXES) - len((head + tail).encode('utf-8'))
-	if len(dir_str_repr.encode('utf-8')) > room:
-		marker = '~' + hashlib.sha1(dir_str_repr.encode('utf-8')).hexdigest()[:8]
+	# file names are limited to 255 bytes, so only the directory part may shrink. Bytes as the OS gets them:
+	# os.fsencode() also takes the undecodable bytes of a directory name (surrogate escapes, -d $'/scratch/\xff')
+	room = 255 - max(len(os.fsencode(suffix)) for suffix in REPORT_SUFFIXES) - len(os.fsencode(head + tail))
+	if len(os.fsencode(dir_str_repr)) > room:
+		marker = '~' + hashlib.sha1(os.fsencode(dir_str_repr)).hexdigest()[:8]
 		room -= len(marker)
-		kept = ''
+		# whole characters only, so an escaped byte or a multi-byte character is never cut in half
+		kept = []
 		for char in dir_str_repr:
-			if len((kept + char).encode('utf-8')) > room:
+			room -= len(os.fsencode(char))
+			if room < 0:
 				break
-			kept += char
-		dir_str_repr = kept + marker
+			kept.append(char)
+		dir_str_repr = ''.join(kept) + marker
 	return head + dir_str_repr + tail
 
 def collect_timeline(timeline_passes, pass_timeline, pass_index, mode):
