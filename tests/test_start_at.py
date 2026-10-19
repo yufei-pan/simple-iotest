@@ -99,3 +99,20 @@ def test_start_at_too_soon_json_reports_lateness(run_main, rec_tl, work_dir):
     run_main(["write"], tl=rec_tl, start_at=time.time() + 0.05, json_path=str(path))
     assert json.loads(path.read_text())["start_late_s"] > 0
     assert not any(m.startswith("Waiting until ") for m in rec_tl.printed)
+
+
+def test_barrier_wait_sleeps_once_until_a_second_before(monkeypatch):
+    sleeps = []
+    real_sleep = time.sleep
+
+    def record(seconds):
+        sleeps.append(seconds)
+        real_sleep(min(seconds, 0.001))
+
+    clock = {"offset": 0.0}
+    real_perf = time.perf_counter
+    monkeypatch.setattr(time, "perf_counter", lambda: real_perf() + clock["offset"])
+    monkeypatch.setattr(time, "sleep", lambda s: (record(s), clock.__setitem__("offset", clock["offset"] + s)))
+    iotest.wait_for_barrier(time.perf_counter() + 3)
+    assert 1.9 < sleeps[0] <= 2.0
+    assert len(sleeps) > 1 and all(s == 0.001 for s in sleeps[1:])

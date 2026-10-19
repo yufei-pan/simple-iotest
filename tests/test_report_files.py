@@ -121,3 +121,21 @@ def test_invalid_arguments_exit_2_without_traceback(tmp_path, args, needle):
 def test_report_is_printed_exactly_once(run_main, rec_tl):
     run_main(["write"], tl=rec_tl, no_report=False)
     assert sum("Report for write mode" in line for line in rec_tl.printed) == 1
+
+
+def test_unencodable_report_text_lands_in_report_errors(iotest_mod, rec_tl, tmp_path):
+    def write(f):
+        raise UnicodeEncodeError("charmap", "x", 0, 1, "character maps to <undefined>")
+
+    errors = []
+    assert iotest_mod.write_report_file(str(tmp_path / "r.txt"), write, rec_tl, errors) is False
+    assert len(errors) == 1 and "Could not write" in errors[0]
+    assert any("Could not write" in line for line in rec_tl.printed)
+
+
+def test_report_files_are_written_as_utf8(iotest_mod, rec_tl, tmp_path):
+    path = tmp_path / "r.txt"
+    errors = []
+    assert iotest_mod.write_report_file(str(path), lambda f: f.write("path /data/测试"), rec_tl, errors)
+    assert errors == []
+    assert path.read_bytes() == "path /data/测试".encode("utf-8")

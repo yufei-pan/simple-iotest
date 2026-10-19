@@ -157,7 +157,7 @@ def test_parent_reads_each_manager_list_in_one_call(run_main, rec_tl, monkeypatc
              timeline=True)
     reads = [args for name, args in calls if name == "__getitem__"]
     # generation benchmark; write, random and comprehensive: results and late starts, and the timeline;
-    # simultaneous: both roles' results and late starts, and the timeline; meta: 3 passes of 3
-    assert len(reads) == 1 + 3 * 3 + 5 + 3 * 3
+    # simultaneous: the layout's errors, both roles' results and late starts, and the timeline; meta: 3 passes of 3
+    assert len(reads) == 1 + 3 * 3 + 6 + 3 * 3
     assert all(args == (slice(None, None, None),) for args in reads)
     assert not [name for name, _ in calls if name in ("__len__", "__iter__", "__contains__")]

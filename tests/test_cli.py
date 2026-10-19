@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -187,3 +188,14 @@ def test_quiet_progress_digits_are_not_glued_to_the_report(tmp_path):
     # ends cleanly whatever prefix (color reset, "[INFO] ") the installed tee-logger puts on the report
     assert "\n9\n" in proc.stdout
     assert "*" * 80 in proc.stdout
+
+
+def test_inline_logger_notice_goes_to_stderr(tmp_path):
+    work = tmp_path / "w"
+    code = ("import sys; sys.modules['Tee_Logger'] = None; sys.path.insert(0, %r); import iotest; "
+            "sys.argv = ['iotest'] + %r; iotest.climain()" % (str(Path(__file__).resolve().parents[1]),
+            ["-S", "-j", "-", "-fs", "1k", "-fc", "2", "-t", "2", "-bt", "1", "-d", str(work), "w"]))
+    proc = subprocess.run([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(proc.stdout)["results"]
+    assert "Using inline logger, forcing noLog..." in proc.stderr

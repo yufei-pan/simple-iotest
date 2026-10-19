@@ -14,6 +14,7 @@ import random
 import re
 import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -103,7 +104,7 @@ except Exception:
 				self.currentDateTime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 				self.noLog = True
 				if not noLog:
-					print('Using inline logger, forcing noLog...')
+					print('Using inline logger, forcing noLog...', file=sys.stderr)
 				self.systemLogFileDir = '/dev/null'
 				self.logsDir = '/dev/null'
 				self.logFileDir = '/dev/null'
@@ -299,8 +300,11 @@ def stamp_unique(buf, worker_id, file_index, first_block=0):
 
 def stamp_chunk(chunk, offset, worker_id, file_index):
 	# with -bs a file is stamped one chunk at a time, at its offset in the file; the tags land
-	# where stamping the whole file would put them, so a chunk that starts inside a 512-byte
-	# block (a -bs that is not a multiple of 512) first finishes the tag the previous one began
+	# at the offsets whole-file stamping uses, so every 512-byte block has its own tag, but the
+	# reused block buffer keeps the earlier chunks' tag bytes (and the previous file's CRC
+	# trailer) elsewhere, so with -z -u -bs the bytes between tags are not all zeros. A chunk
+	# that starts inside a 512-byte block (a -bs that is not a multiple of 512) first finishes
+	# the tag the previous one began
 	block, into = divmod(offset, UNIQUE_STAMP_INTERVAL)
 	if into:
 		rest = UNIQUE_TAG.pack(file_index, block, worker_id)[into:into + len(chunk)]
@@ -714,6 +718,14 @@ def worker_color_log(color, msg, quiet=False):
 	r, g, b = color
 	worker_log(f'\033[38;2;{r};{g};{b}m{msg}\033[0m', quiet=quiet)
 
+def wait_for_barrier(start_time):
+	# one long sleep until about 1 s before the barrier, then the 1 ms loop for the precise start
+	ahead = start_time - time.perf_counter() - 1
+	if ahead > 0:
+		time.sleep(ahead)
+	while time.perf_counter() < start_time:
+		time.sleep(0.001)
+
 def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False, late_starts=None, progress_to_stderr=False, timeline=None, block_size=None, verify=False):
 	# the ops append to a list as they go; it becomes one compact record after the last
 	local_results = []
@@ -740,9 +752,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 			late_starts.append(time.perf_counter() - thread_start_time)
 	log(f'Worker {counter} primed, waiting for {thread_start_time-time.perf_counter():.4f} seconds.')
 	# wait until thread_start_time
-	while time.perf_counter() < thread_start_time:
-		# sleep for 1 ms
-		time.sleep(0.001)
+	wait_for_barrier(thread_start_time)
 	if not is_meta:
 		os.makedirs(os.path.join(directory,str(counter)), exist_ok=True)
 	reportInterval = max(file_count // 10,1)
@@ -862,9 +872,10 @@ def worker_files(directories, process_count, file_count):
 
 def existing_size(path):
 	try:
-		return os.path.getsize(path) if os.path.isfile(path) else 0
+		st = os.stat(path)
 	except OSError:
 		return 0
+	return st.st_size if stat.S_ISREG(st.st_mode) else 0
 
 FREE_SPACE_MARGIN = 0.95
 
@@ -1001,9 +1012,13 @@ def leftover_hint(directories, process_counts, file_count):
 	for directory, counter_name in {pair for process_count in process_counts for pair in worker_dirs(directories, process_count)}:
 		for index in range(file_count):
 			path = worker_file_path(directory, counter_name, index, file_count)
-			if os.path.isfile(path):
+			try:
+				st = os.stat(path)
+			except OSError:
+				continue
+			if stat.S_ISREG(st.st_mode):
 				count += 1
-				total += existing_size(path)
+				total += st.st_size
 	if not count:
 		return None
 	return (f"Left {count} test files ({format_bytes(total)}B) in {', '.join(directories)}; "
@@ -1012,14 +1027,17 @@ def leftover_hint(directories, process_counts, file_count):
 def simultaneous_worker_dir(base_directory, run_id, counter):
 	return os.path.join(base_directory, f".iotest_simul_{run_id}", f"worker_{counter}")
 
-def layout_read_worker(file_count, file_size, base_directory, run_id, counter, quiet, zeros, unique=False, block_size=None, verify=False):
+def layout_read_worker(file_count, file_size, base_directory, run_id, counter, quiet, zeros, unique=False, block_size=None, verify=False, errors=None):
 	content = FileContent(file_size, zeros, unique, new_stamp_id(), block_size, verify)
 	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
 	os.makedirs(worker_dir, exist_ok=True)
 	for i in range(file_count):
 		i_str = str(i + 1).zfill(len(str(file_count)))
 		file_name = os.path.join(worker_dir, f"read_{i_str}.bin")
-		content.write(file_name, i, quiet=quiet)
+		op_result = content.write(file_name, i, quiet=quiet)
+		# a read file that was not laid out would be recreated inside the timed pass, so report it
+		if errors is not None and op_result[0] is None:
+			errors.append(str(op_result[1]))
 
 def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id, counter, results, quiet, zeros, thread_start_time, unique=False, late_starts=None, timeline=None, block_size=None, verify=False):
 	local_results = []
@@ -1032,8 +1050,7 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 		content.prepare()
 	if late_starts is not None and time.perf_counter() > thread_start_time:
 		late_starts.append(time.perf_counter() - thread_start_time)
-	while time.perf_counter() < thread_start_time:
-		time.sleep(0.001)
+	wait_for_barrier(thread_start_time)
 	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
 	os.makedirs(worker_dir, exist_ok=True)
 	file_prefix = 'write_' if role == 'write' else 'read_'
@@ -1078,15 +1095,23 @@ def run_simultaneous_layout(file_count, file_size, directories, run_id, layout_w
 	tl.teeprint(f"Simultaneous mode: layout pass writing read files ({layout_worker_count} workers)...")
 	layout_start = time.perf_counter()
 	layout_processes = []
+	layout_manager = Manager()
+	layout_errors = layout_manager.list()
 	for counter in range(layout_worker_count):
 		assigned_directory = directories[counter % len(directories)]
 		counter_str = worker_counter_name(counter, counter_padding_process_count)
-		p = Process(target=layout_read_worker, args=(file_count, file_size, assigned_directory, run_id, counter_str, quiet, zeros, unique, block_size, verify))
+		p = Process(target=layout_read_worker, args=(file_count, file_size, assigned_directory, run_id, counter_str, quiet, zeros, unique, block_size, verify, layout_errors))
 		layout_processes.append(p)
 	start_processes(layout_processes)
 	for p in layout_processes:
 		p.join()
+	# one bulk fetch: iterating a proxy costs a round trip per item
+	failures = layout_errors[:]
+	layout_manager.shutdown()
+	if failures:
+		tl.teeerror(f"Layout pass could not write {len(failures)} read files, first error: {failures[0]}")
 	tl.teeprint(f"Layout pass complete in {time.perf_counter() - layout_start:.4f} s")
+	return failures
 
 def normalize_directories(directory):
 	if isinstance(directory, str):
@@ -1186,7 +1211,8 @@ def dead_worker_errors(processes, file_count):
 	return errors
 
 def total_failed_ops(result):
-	return sum(len(errors) for errors in result.get('failedOps', {}).values())
+	# layout write failures count like failed ops: they make the run exit 1
+	return sum(len(errors) for errors in result.get('failedOps', {}).values()) + len(result.get('layout_errors', ()))
 
 def benchmarkGenSpeed(file_size, file_count,zeros,results,timeout=5):
 	start_time = time.perf_counter()
@@ -1451,9 +1477,9 @@ def write_timeline(timeline_passes):
 def write_report_file(path, write_content, tl, report_errors, newline=None):
 	try:
 		# csv writes its own line endings, so it needs newline='' to avoid \r\r\n on Windows
-		with open(path, "w", newline=newline) as f:
+		with open(path, "w", newline=newline, encoding="utf-8") as f:
 			write_content(f)
-	except OSError as e:
+	except (OSError, ValueError) as e:
 		message = f"Could not write {path}: {e}"
 		tl.teeerror(message)
 		report_errors.append(message)
@@ -1631,6 +1657,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	processes = []
 	outResults = dict()
 	failedOps = {}
+	layout_errors = []
 	late_starts = {}
 	start_notes = []
 	start_late = []
@@ -1776,8 +1803,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				layout_worker_count = simultaneous_layout_workers if simultaneous_layout_workers is not None else process_count
 				try:
 					if not simultaneous_skip_layout:
-						run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
+						layout_errors = run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
 							layout_padding_pc, quiet, zeros, tl, unique, block_size, verify)
+						if layout_errors:
+							# the finally below still cleans the tree up
+							continue
 					write_results = manager.list()
 					read_results = manager.list()
 					write_late = manager.list()
@@ -1972,6 +2002,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		'late_starts': late_starts,
 		'sync_estimated': sync_estimated,
 		'report_errors': report_errors,
+		'layout_errors': layout_errors,
 	}
 
 MODE_ALIASES = {
@@ -2187,9 +2218,11 @@ def tune_simultaneous(options, tl, write_target, read_target):
 	if not check_free_space(needed, tl):
 		sys.exit(1)
 	try:
-		run_simultaneous_layout(options.file_count, options.file_size, directories, run_id, layout_workers, max_pc,
+		layout_failures = run_simultaneous_layout(options.file_count, options.file_size, directories, run_id, layout_workers, max_pc,
 			options.quiet, options.zeros, tl, options.unique, effective_block_size(options.block_size, options.file_size),
 			options.verify)
+		if layout_failures:
+			sys.exit(1)
 		for attempt in range(1, MAX_TUNING_ATTEMPTS + 1):
 			result = _run_tuning_main(options, tl, pc, write_count, simultaneous_session=sim_session)
 			write_measured = measure_role_bandwidth(result, 'write')
@@ -2440,7 +2473,7 @@ def climain():
 	parser.add_argument('-tl',"--timeline", action="store_true", help="Also write <report name>_ops.csv, the start time, duration and error of every operation, even with -nr or -S. Costs up to about %d bytes of memory per operation" % max(TIMELINE_BYTES_PER_OP.values()),default=False)
 	parser.add_argument("-z","--zeros", action="store_true", help="Use zeros instead of random numbers. Use this if you are sure no write compression is available. Potentially higher write accuracy.",default=False)
 	parser.add_argument("-u","--unique_files", action="store_true", help="Stamp every 512-byte block with (file, block, worker) so no two blocks of the run are identical. Use on storage that deduplicates (iotest warns when it detects some). Adds a few ms per 30 MiB file to sync times.",default=False)
-	parser.add_argument("--verify", action="store_true", help="End every file with a CRC-32 of its other bytes and check it on every read, in this run or a later one, to detect bit flips and torn or misplaced writes. Implies -u. Needs a file size of at least 8 bytes; files written without --verify fail the check",default=False)
+	parser.add_argument("--verify", action="store_true", help="End every file with a CRC-32 of its other bytes and check it on every read, in this run or a later one, to detect bit flips and torn or misplaced writes. Implies -u. Needs a file size of at least 28 bytes; files written without --verify fail the check",default=False)
 	parser.add_argument("-j","--json", dest="json_path", metavar="PATH", type=str, help="Write a JSON summary of the run to PATH after the text report. Use - for stdout (with -S, stdout then carries only the JSON)",default=None)
 	parser.add_argument("-cl","--cleanup", action="store_true", help="Delete the test files when the run ends (default: keep them, so a later read run can reuse them)",default=False)
 	parser.add_argument('-addr',"--message_end_point_address", type=str, help="The end point address of the message")
@@ -2499,8 +2532,8 @@ def climain():
 				args.process_count = max(total_size // denominator, 1)
 				tl.teelog(f"Adjusted -t/-pc to {args.process_count} to fit total_size {format_bytes(total_size)}B", level='info')
 	# after -ts, which can set the file size
-	if args.verify and args.file_size < 8:
-		parser.error(f"--verify requires a file size of at least 8 bytes, got {args.file_size}")
+	if args.verify and args.file_size < 28:
+		parser.error(f"--verify requires a file size of at least 28 bytes, got {args.file_size}")
 
 	modes = parse_modes(args.mode)
 	write_target = None

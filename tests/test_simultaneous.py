@@ -74,3 +74,17 @@ def test_tuning_attempt_readers_find_the_padded_layout(iotest_mod, work_dir, rec
     # writers use the layout's padding too, so every attempt overwrites the same files
     # instead of leaving a second set in worker_0.. when the count drops below 10
     assert list(simul.glob("worker_?")) == []
+
+
+def test_layout_write_failure_skips_the_timed_pass_and_is_reported(iotest_mod, run_main, work_dir, rec_tl):
+    # a directory where a read file belongs makes that layout write fail
+    for counter in range(2):
+        blocker = Path(iotest_mod.simultaneous_worker_dir(str(work_dir), "lf", iotest_mod.worker_counter_name(counter, 2))) / "read_1.bin"
+        blocker.mkdir(parents=True)
+    result = run_main(["simultaneous"], process_count=2, tl=rec_tl, simultaneous_run_id="lf")
+    assert len(result["layout_errors"]) == 2
+    assert any("Layout pass could not write 2 read files" in line for line in rec_tl.printed)
+    assert not any("writers +" in line for line in rec_tl.printed)
+    assert result["outResults"] == {}
+    assert iotest_mod.total_failed_ops(result) == 2
+    assert not (Path(work_dir) / ".iotest_simul_lf").exists()

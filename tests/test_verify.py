@@ -38,11 +38,11 @@ def worker_files(work_dir):
 
 
 def test_verify_implies_unique_and_survives_replace(iotest_mod):
-    options = iotest_mod.RunOptions(file_size=8, file_count=1, process_count=1, modes=["write"], verify=True)
+    options = iotest_mod.RunOptions(file_size=28, file_count=1, process_count=1, modes=["write"], verify=True)
     # tuning runs every attempt through replace(), which rebuilds the options from their attributes
     for opts in (options, options.replace(process_count=2)):
         assert opts.verify is True and opts.unique is True
-    plain = iotest_mod.RunOptions(file_size=8, file_count=1, process_count=1, modes=["write"], unique=True)
+    plain = iotest_mod.RunOptions(file_size=28, file_count=1, process_count=1, modes=["write"], unique=True)
     assert plain.verify is False
 
 
@@ -184,8 +184,8 @@ def test_cli_verify_catches_a_flipped_byte(tmp_path):
     assert mismatch(path, data) in proc.stdout
 
 
-@pytest.mark.parametrize("size,code", [("4b", 2), ("7b", 2), ("8b", 0)])
-def test_cli_verify_needs_a_file_size_of_at_least_8_bytes(tmp_path, size, code):
+@pytest.mark.parametrize("size,code", [("4b", 2), ("8b", 2), ("27b", 2), ("28b", 0)])
+def test_cli_verify_needs_a_file_size_of_at_least_28_bytes(tmp_path, size, code):
     work = tmp_path / "w"
     proc = run_iotest(["-fs", size, "-fc", "1", "-pc", "1", "-d", str(work), "-nl", "-nr", "-bt", "1", "--verify",
                        "write"])
@@ -196,7 +196,7 @@ def test_cli_verify_needs_a_file_size_of_at_least_8_bytes(tmp_path, size, code):
         assert "--verify" in proc.stderr and not work.exists()
     else:
         data = (work / "0" / "temp_1.bin").read_bytes()
-        assert len(data) == 8 and stored_crc(data) == computed_crc(data)
+        assert len(data) == 28 and stored_crc(data) == computed_crc(data)
 
 
 def spy_verify_reads(iotest_mod, monkeypatch, log):
@@ -233,3 +233,13 @@ def test_simultaneous_readers_detect_a_flipped_layout_byte(run_main, iotest_mod,
     result = run_main(["simultaneous"], process_count=2, file_count=2, file_size=1024, verify=True)
     failed = [e for errors in result["failedOps"].values() for e in errors]
     assert failed and all("CRC-32 mismatch" in e for e in failed)
+
+
+def test_two_workers_write_different_files_at_the_smallest_verify_size(tmp_path):
+    work = tmp_path / "w"
+    proc = run_iotest(["-fs", "28b", "-fc", "1", "-pc", "2", "-d", str(work), "-nl", "-nr", "-bt", "1", "--verify", "write"])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    files = [p.read_bytes() for p in sorted(work.glob("*/temp_1.bin"))]
+    assert len(files) == 2 and files[0] != files[1]
+    # the worker id sits in the tag, ahead of the CRC
+    assert files[0][16:24] != files[1][16:24]
