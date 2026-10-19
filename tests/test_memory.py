@@ -223,43 +223,53 @@ def test_memory_cut_that_changes_padding_recounts_recreated_files(run_main, iote
     assert result["process_count"] == int(available // recreating)
 
 
+def test_every_mode_has_its_per_op_figures(iotest_mod):
+    modes = set(iotest_mod.OPS_PER_FILE)
+    assert modes == {"write", "read", "random", "index", "comprehensive", "meta", "simultaneous"}
+    assert set(iotest_mod.RESULT_BYTES_PER_OP) == set(iotest_mod.TIMELINE_BYTES_PER_OP) == modes
+    assert all(v > 0 for v in iotest_mod.RESULT_BYTES_PER_OP.values())
+    assert all(v > 0 for v in iotest_mod.TIMELINE_BYTES_PER_OP.values())
+
+
 @pytest.mark.parametrize(
-    "modes,ops_per_file",
+    "mode,ops_per_file",
     [
-        (["write"], 1),
-        (["read"], 1),
-        (["random"], 1),
-        (["index"], 1),
-        (["comprehensive"], 4),
+        ("write", 1),
+        ("read", 1),
+        ("random", 1),
+        ("index", 1),
+        ("comprehensive", 4),
         # three passes of one op
-        (["meta"], 3),
+        ("meta", 3),
         # each simultaneous worker, writer or reader, does one op per file
-        (["simultaneous"], 1),
-        (["benchmark"], 0),
-        (["write", "read", "index"], 3),
+        ("simultaneous", 1),
     ],
 )
-def test_ops_per_process_sums_the_passes(iotest_mod, modes, ops_per_file):
-    assert iotest_mod.ops_per_process(modes, 7) == 7 * ops_per_file
+def test_memory_per_process_counts_every_op_at_its_modes_figure(iotest_mod, mode, ops_per_file):
+    per_process = iotest_mod.memory_per_process
+    result, timeline = iotest_mod.RESULT_BYTES_PER_OP[mode], iotest_mod.TIMELINE_BYTES_PER_OP[mode]
+    buffers = per_process([mode], 1024, 0)
+    # grows with the file count, and more with --timeline
+    assert per_process([mode], 1024, 1000) == pytest.approx(buffers + 1000 * ops_per_file * result)
+    assert per_process([mode], 1024, 1000, timeline=True) == pytest.approx(
+        buffers + 1000 * ops_per_file * (result + timeline))
 
 
-def test_memory_per_process_grows_with_file_count_and_timeline(iotest_mod):
+def test_memory_per_process_adds_the_modes_ops_to_the_buffers(iotest_mod):
     per_process = iotest_mod.memory_per_process
     result, timeline = iotest_mod.RESULT_BYTES_PER_OP, iotest_mod.TIMELINE_BYTES_PER_OP
-    assert result > 0 and timeline > 0
     # the data buffers, as before
-    buffers = per_process(["write"], 1024, 0)
-    assert buffers == pytest.approx(1024 * 1.2)
+    assert per_process(["write"], 1024, 0) == pytest.approx(1024 * 1.2)
     assert per_process(["comprehensive"], 1024, 0) == pytest.approx(2 * 1024 * 1.2)
-    # plus every op the process performs over the run
-    assert per_process(["write"], 1024, 1000) == pytest.approx(buffers + 1000 * result)
-    assert per_process(["write", "read"], 1024, 1000) == pytest.approx(buffers + 2000 * result)
-    assert per_process(["write"], 1024, 1000, timeline=True) == pytest.approx(buffers + 1000 * (result + timeline))
-    assert per_process(["comprehensive"], 1024, 1000, timeline=True) == pytest.approx(
-        2 * 1024 * 1.2 + 4000 * (result + timeline))
+    # one figure per pass's mode
+    assert per_process(["write", "read", "index"], 1024, 10) == pytest.approx(
+        1024 * 1.2 + 10 * (result["write"] + result["read"] + result["index"]))
+    assert per_process(["write", "read"], 1024, 10, timeline=True) == pytest.approx(
+        1024 * 1.2 + 10 * (result["write"] + timeline["write"] + result["read"] + timeline["read"]))
+    # benchmark performs no ops
+    assert per_process(["benchmark"], 1024, 10) == pytest.approx(1024 * 1.2)
     # meta holds no data, but no longer estimates zero
-    assert per_process(["meta"], 1024, 1000) == pytest.approx(3000 * result)
-    assert per_process(["meta"], 1024, 1000, timeline=True) == pytest.approx(3000 * (result + timeline))
+    assert per_process(["meta"], 1024, 10) == pytest.approx(30 * result["meta"])
 
 
 @pytest.mark.parametrize("timeline", [False, True])

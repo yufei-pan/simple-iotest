@@ -815,11 +815,14 @@ def worker_counter_name(counter, process_count):
 def worker_file_path(directory, counter_name, index, file_count):
 	return os.path.join(directory, str(counter_name), f"temp_{str(index + 1).zfill(len(str(file_count)))}.bin")
 
+def worker_dirs(directories, process_count):
+	# (directory, counter_name) of every plain worker
+	for counter in range(process_count):
+		yield directories[counter % len(directories)], worker_counter_name(counter, process_count)
+
 def worker_files(directories, process_count, file_count):
 	# (directory, counter_name, path) of every temp file the plain workers use
-	for counter in range(process_count):
-		directory = directories[counter % len(directories)]
-		counter_name = worker_counter_name(counter, process_count)
+	for directory, counter_name in worker_dirs(directories, process_count):
 		for index in range(file_count):
 			yield directory, counter_name, worker_file_path(directory, counter_name, index, file_count)
 
@@ -948,9 +951,7 @@ def cleanup_worker_files(directories, process_count, file_count):
 	remove_worker_files(worker_files(directories, process_count, file_count))
 
 def cleanup_meta_dirs(directories, process_count):
-	for counter in range(process_count):
-		directory = directories[counter % len(directories)]
-		counter_name = worker_counter_name(counter, process_count)
+	for directory, counter_name in worker_dirs(directories, process_count):
 		meta_dir = meta_dir_path(directory, counter_name)
 		remove_meta_leftovers(meta_dir)
 		remove_meta_dir(meta_dir)
@@ -960,12 +961,18 @@ def cleanup_meta_dirs(directories, process_count):
 			pass
 
 def leftover_hint(directories, process_counts, file_count):
-	paths = sorted({path for process_count in process_counts
-		for _, _, path in worker_files(directories, process_count, file_count) if os.path.isfile(path)})
-	if not paths:
+	# runs at several process counts share counter names, and so files: count each worker's files once,
+	# going through them instead of holding every path
+	count = total = 0
+	for directory, counter_name in {pair for process_count in process_counts for pair in worker_dirs(directories, process_count)}:
+		for index in range(file_count):
+			path = worker_file_path(directory, counter_name, index, file_count)
+			if os.path.isfile(path):
+				count += 1
+				total += existing_size(path)
+	if not count:
 		return None
-	total = sum(existing_size(path) for path in paths)
-	return (f"Left {len(paths)} test files ({format_bytes(total)}B) in {', '.join(directories)}; "
+	return (f"Left {count} test files ({format_bytes(total)}B) in {', '.join(directories)}; "
 		"use -cl/--cleanup to remove them.")
 
 def simultaneous_worker_dir(base_directory, run_id, counter):
@@ -1256,25 +1263,29 @@ def memory_copies(modes, read_recreates=False):
 		return 2
 	return 1
 
-# memory per op performed, in the parent and the manager process together. Every run keeps each op's
-# result until it ends (the manager holds a pass's while it runs); --timeline adds the op's record, 21 bytes
-# in arrays plus the copies made handing a pass over. Measured as the slope of their peak RSS (VmHWM) from
-# -fc 25000 to 50000 at -pc 8 with 1 KiB files, in every mode (Python 3.13, Linux, 2-3 runs each): results
-# took 55 (meta) to 167 (comprehensive) bytes an op, the timeline 49 (meta) to 127 (write) more. These are
-# the largest plus about 20 %
-RESULT_BYTES_PER_OP = 200
-TIMELINE_BYTES_PER_OP = 160
-
 # ops each process performs per file in each mode (meta is three passes of one op)
 OPS_PER_FILE = {'write': 1, 'read': 1, 'random': 1, 'index': 1, 'comprehensive': 4, 'meta': 3, 'simultaneous': 1}
 
-def ops_per_process(modes, file_count):
-	return file_count * sum(OPS_PER_FILE.get(mode, 0) for mode in modes)
+# memory per op performed, by mode, in the parent and the manager process together. Every run keeps each
+# op's result until it ends; while a pass is collected the manager holds all of it and pickles it in one
+# go, and the parent holds it as fetched and as sorted into result keys. --timeline adds the op's record:
+# 21 bytes in arrays, plus the copies made handing a pass over. Measured as the slope of their peak RSS
+# (VmHWM) from -fc 25000 to 75000 at -pc 8 with 1 KiB files (Python 3.13, Linux, fork, 4 runs per mode).
+# Results: meta 63-79 bytes an op (the manager holds one of its three passes at a time), write, read and
+# index 115-130, simultaneous 135-147, comprehensive 174-184 (a list of 4 per file), random 285-319 (a
+# (kind, time) tuple per op). The timeline: 36-56 more for meta, 35-75 for the others. Each figure is the
+# largest slope plus about 20 %; write, read and index, which return the same one float per op, share the
+# largest of theirs. Failed ops' error texts (100-200 bytes each) are not counted.
+RESULT_BYTES_PER_OP = {'write': 160, 'read': 160, 'index': 160, 'simultaneous': 180, 'comprehensive': 230,
+	'random': 390, 'meta': 100}
+TIMELINE_BYTES_PER_OP = {'write': 90, 'read': 90, 'index': 90, 'simultaneous': 90, 'comprehensive': 80,
+	'random': 80, 'meta': 70}
 
 def memory_per_process(modes, buffer_size, file_count, read_recreates=False, timeline=False):
 	# a worker's data buffers, plus what the parent and the manager keep for every op it performs over the run
-	per_op = RESULT_BYTES_PER_OP + (TIMELINE_BYTES_PER_OP if timeline else 0)
-	return buffer_size * memory_copies(modes, read_recreates) * 1.2 + ops_per_process(modes, file_count) * per_op
+	op_bytes = sum(OPS_PER_FILE.get(mode, 0) * (RESULT_BYTES_PER_OP.get(mode, 0)
+		+ (TIMELINE_BYTES_PER_OP.get(mode, 0) if timeline else 0)) for mode in modes)
+	return buffer_size * memory_copies(modes, read_recreates) * 1.2 + file_count * op_bytes
 
 def read_meminfo():
 	# (MemAvailable, SwapFree) in bytes, -1 when unknown
@@ -1684,7 +1695,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				p.join()
 			processes.clear()
 			genTime = time.perf_counter() - genStartTime
-			genSpeed = sum(results)
+			genSpeed = sum(results[:])
 			if genSpeed > 0:
 				genTimeCalc = buffer_size * gen_benchmark_workers / genSpeed
 				processStartDelay = 0.005 * process_count + 1 + genTimeCalc
@@ -1762,8 +1773,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					for p in read_processes:
 						p.join()
 					read_sync_time = time.perf_counter() - totalStartTime
-					add_op_results(outResults, failedOps, 'write', list(write_results) + dead_worker_errors(write_processes, file_count))
-					add_op_results(outResults, failedOps, 'read', list(read_results) + dead_worker_errors(read_processes, file_count))
+					# one bulk fetch per list: iterating a proxy costs a round trip per item
+					write_results, read_results = write_results[:], read_results[:]
+					write_late, read_late = write_late[:], read_late[:]
+					add_op_results(outResults, failedOps, 'write', write_results + dead_worker_errors(write_processes, file_count))
+					add_op_results(outResults, failedOps, 'read', read_results + dead_worker_errors(read_processes, file_count))
 					addToDicWithoutOverwrite(totalTime, 'write', write_sync_time)
 					addToDicWithoutOverwrite(totalTime, 'read', read_sync_time)
 					addToDicWithoutOverwrite(mode_process_counts, 'write', write_count)
@@ -1771,7 +1785,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					record_pass_meta(late_starts, sync_estimated, 'write', write_late, False)
 					record_pass_meta(late_starts, sync_estimated, 'read', read_late, False)
 					collect_timeline(timeline_passes, pass_timeline, pass_index, mode)
-					warn_late_starts(tl, 'simultaneous', list(write_late) + list(read_late), process_count)
+					warn_late_starts(tl, 'simultaneous', write_late + read_late, process_count)
 				finally:
 					if not simultaneous_skip_cleanup:
 						cleanup_simultaneous_tree(directories, run_id, layout_padding_pc)
@@ -1798,9 +1812,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			totalEndTime =  time.perf_counter() - totalStartTime
 			dead_errors = dead_worker_errors(processes, file_count)
 			processes.clear()
+			# one bulk fetch per list: iterating a proxy costs a round trip per item
+			results, late = results[:], late[:]
 			collect_timeline(timeline_passes, pass_timeline, pass_index, 'meta' if mode.startswith('meta_') else mode)
 			if mode == 'comprehensive':
-				results = list(results) + [[error] * 4 for error in dead_errors]
+				results = results + [[error] * 4 for error in dead_errors]
 				writes = add_op_results(outResults,failedOps,'write',[result[0] for result in results])
 				moves = add_op_results(outResults,failedOps,'move',[result[1] for result in results])
 				stats = add_op_results(outResults,failedOps,'stat',[result[2] for result in results])
@@ -1838,11 +1854,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					addToDicWithoutOverwrite(mode_process_counts,'random',process_count)
 					record_pass_meta(late_starts, sync_estimated, 'random', late, False)
 			else:
-				add_op_results(outResults,failedOps,mode,list(results) + dead_errors)
+				add_op_results(outResults,failedOps,mode,results + dead_errors)
 				addToDicWithoutOverwrite(totalTime,mode,totalEndTime)
 				addToDicWithoutOverwrite(mode_process_counts,mode,process_count)
 				record_pass_meta(late_starts, sync_estimated, mode, late, False)
-			warn_late_starts(tl, mode, list(late), process_count)
+			warn_late_starts(tl, mode, late, process_count)
 	report_errors = []
 	writes_reports = not options.no_report and bool(outResults)
 	# an explicit --timeline is written also with -nr (and -S), like --json
@@ -2383,7 +2399,7 @@ def climain():
 	parser.add_argument("-S",'--stealth', action="store_true", help="Suppress verbose output and verbose log file",default=False)
 	parser.add_argument('-nl',"--no_log", action="store_true", help="Do not write log files",default=False)
 	parser.add_argument('-nr',"--no_report", action="store_true", help="Do not write report files",default=False)
-	parser.add_argument('-tl',"--timeline", action="store_true", help="Also write <report name>_ops.csv, the start time, duration and error of every operation, even with -nr or -S. Costs up to about %d bytes of memory per operation" % TIMELINE_BYTES_PER_OP,default=False)
+	parser.add_argument('-tl',"--timeline", action="store_true", help="Also write <report name>_ops.csv, the start time, duration and error of every operation, even with -nr or -S. Costs up to about %d bytes of memory per operation" % max(TIMELINE_BYTES_PER_OP.values()),default=False)
 	parser.add_argument("-z","--zeros", action="store_true", help="Use zeros instead of random numbers. Use this if you are sure no write compression is available. Potentially higher write accuracy.",default=False)
 	parser.add_argument("-u","--unique_files", action="store_true", help="Stamp every 512-byte block with (file, block, worker) so no two blocks of the run are identical. Use on storage that deduplicates (iotest warns when it detects some). Adds a few ms per 30 MiB file to sync times.",default=False)
 	parser.add_argument("--verify", action="store_true", help="End every file with a CRC-32 of its other bytes and check it on every read, in this run or a later one, to detect bit flips and torn or misplaced writes. Implies -u. Needs a file size of at least 8 bytes; files written without --verify fail the check",default=False)

@@ -1,4 +1,5 @@
 import math
+import multiprocessing.managers
 from pathlib import Path
 
 import pytest
@@ -140,3 +141,23 @@ def test_report_includes_iops(iotest_mod, work_dir, rec_tl, modes, roles):
         for kind in ("call", "sync"):
             iops = float(_report_value(report, f"{role} IOPS ({kind}):").replace(",", ""))
             assert_finite_positive(iops)
+
+
+def test_parent_reads_each_manager_list_in_one_call(run_main, rec_tl, monkeypatch):
+    # a proxy read item by item costs one round trip to the manager per op
+    calls = []
+    real = multiprocessing.managers.BaseProxy._callmethod
+
+    def spy(self, methodname, args=(), kwds={}):
+        calls.append((methodname, args))
+        return real(self, methodname, args, kwds)
+
+    monkeypatch.setattr(multiprocessing.managers.BaseProxy, "_callmethod", spy)
+    run_main(["write", "random", "comprehensive", "simultaneous", "meta"], process_count=2, file_count=3, tl=rec_tl,
+             timeline=True)
+    reads = [args for name, args in calls if name == "__getitem__"]
+    # generation benchmark; write, random and comprehensive: results and late starts, and the timeline;
+    # simultaneous: both roles' results and late starts, and the timeline; meta: 3 passes of 3
+    assert len(reads) == 1 + 3 * 3 + 5 + 3 * 3
+    assert all(args == (slice(None, None, None),) for args in reads)
+    assert not [name for name, _ in calls if name in ("__len__", "__iter__", "__contains__")]

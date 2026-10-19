@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import tracemalloc
 import types
 from pathlib import Path
 
@@ -100,6 +101,34 @@ def test_leftover_hint_counts_only_the_given_runs(iotest_mod, work_dir):
             Path(path).write_bytes(b"x")
     # runs at 12 and 3 own 00..11 and 0..2; 3..8 belong to the -pc 9 run
     assert "Left 15 test files" in iotest_mod.leftover_hint([str(work_dir)], [12, 3], 1)
+
+
+def test_leftover_hint_counts_files_shared_by_two_runs_once(iotest_mod, tmp_path):
+    dirs = [str(tmp_path / "a"), str(tmp_path / "b")]
+    # -pc 4 and -pc 2 both use workers 0 and 1, so their files are the same ones
+    for _, _, path in iotest_mod.worker_files(dirs, 4, 2):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"x" * 100)
+    hint = iotest_mod.leftover_hint(dirs, [4, 2], 2)
+    assert hint == "Left 8 test files (%sB) in %s; use -cl/--cleanup to remove them." % (
+        iotest_mod.format_bytes(800), ", ".join(dirs))
+    # -fc 10 names its files temp_01..temp_10
+    assert iotest_mod.leftover_hint(dirs, [4], 10) is None
+
+
+def test_leftover_hint_does_not_hold_every_path(iotest_mod, work_dir):
+    for _, _, path in iotest_mod.worker_files([str(work_dir)], 4, 500):
+        Path(path).parent.mkdir(exist_ok=True)
+        Path(path).write_bytes(b"x")
+    tracemalloc.start()
+    try:
+        hint = iotest_mod.leftover_hint([str(work_dir)], [4, 2], 500)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert hint.startswith("Left 2000 test files")
+    # a set of the 2000 paths alone is several hundred KiB
+    assert peak < 64 * 1024
 
 
 def test_cleanup_reaches_tuning_runs(iotest_mod, work_dir, rec_tl, tiny):
