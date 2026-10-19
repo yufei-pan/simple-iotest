@@ -1655,8 +1655,10 @@ def write_timeline(timeline_passes):
 
 def write_report_file(path, write_content, tl, report_errors, newline=None):
 	try:
-		# csv writes its own line endings, so it needs newline='' to avoid \r\r\n on Windows
-		with open(path, "w", newline=newline, encoding="utf-8") as f:
+		# csv writes its own line endings, so it needs newline='' to avoid \r\r\n on Windows. An error text can carry
+		# the undecodable bytes of a directory name (-d $'/scratch/\xff', surrogate escapes), which strict UTF-8
+		# would refuse, losing the file: they are written as \udcff, as the JSON's escapes write them
+		with open(path, "w", newline=newline, encoding="utf-8", errors="backslashreplace") as f:
 			write_content(f)
 	except (OSError, ValueError) as e:
 		message = f"Could not write {path}: {e}"
@@ -1764,6 +1766,7 @@ def build_json_summary(options, started, key_stats, late_starts, sync_estimated,
 	}
 
 def write_json_summary(path, summary, tl, report_errors):
+	# ensure_ascii (the default) escapes every non-ASCII character, an undecodable one too: valid JSON, all ASCII
 	text = json.dumps(summary, indent=2) + '\n'
 	if path == '-':
 		sys.stdout.write(text)

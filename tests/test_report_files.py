@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -58,6 +59,54 @@ def test_an_undecodable_directory_gets_its_result_files(run_main, rec_tl, tmp_pa
     result = run_main(["write"], directory=str(d), tl=rec_tl, no_report=False, timeline=True)
     assert result["report_errors"] == []
     assert len(list(d.glob("iotest_*"))) == 3
+
+
+def undecodable_dir_with_a_failing_read(tmp_path):
+    # the read must recreate temp_1.bin, which a directory blocks: its error text carries the raw path
+    d = tmp_path / ("data" + UNDECODABLE)
+    (d / "0000" / "temp_1.bin").mkdir(parents=True)
+    return d
+
+
+def assert_result_files(d, failed_path):
+    names = sorted(p.name for p in d.iterdir() if p.is_file())
+    assert len([n for n in names if n.endswith("_ops.csv")]) == 1
+    assert len([n for n in names if n.endswith("_report.txt")]) == 1
+    assert len([n for n in names if n.endswith(".csv") and not n.endswith("_ops.csv")]) == 1
+    assert "out.json" in names
+    escaped = failed_path.replace(UNDECODABLE, "\\udcff")
+    for name in names:
+        # valid UTF-8 throughout, the undecodable byte written as \udcff
+        text = (d / name).read_bytes().decode("utf-8")
+        if name.endswith(("_report.txt", "_ops.csv")):
+            assert "recreating missing " + escaped in text, name
+    data = json.loads((d / "out.json").read_text())
+    assert data["failed_ops"] == 1
+    assert data["results"]["read"]["first_error"].startswith("recreating missing " + failed_path)
+
+
+@linux_only
+def test_error_texts_with_undecodable_paths_keep_every_result_file(run_main, rec_tl, iotest_mod, tmp_path):
+    d = undecodable_dir_with_a_failing_read(tmp_path)
+    result = run_main(["read"], directory=str(d), tl=rec_tl, no_report=False, timeline=True,
+        json_path=str(d / "out.json"))
+    assert result["report_errors"] == []
+    assert iotest_mod.total_failed_ops(result) == 1
+    assert_result_files(d, str(d / "0000" / "temp_1.bin"))
+
+
+@linux_only
+@pytest.mark.skipif(sys.version_info < (3, 7), reason="stdout takes undecodable bytes only in UTF-8 mode (3.7+)")
+def test_cli_in_an_undecodable_directory_exits_1_for_the_failed_op_only(tmp_path):
+    d = undecodable_dir_with_a_failing_read(tmp_path)
+    proc = subprocess.run([sys.executable, str(MODULE), "-fs", "1k", "-fc", "1", "-pc", "1", "-d", str(d), "-nl",
+                           "-bt", "1", "-tl", "-j", str(d / "out.json"), "read"],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                          env=dict(os.environ, PYTHONUTF8="1"))
+    out = os.fsdecode(proc.stdout)
+    assert proc.returncode == 1, out + os.fsdecode(proc.stderr)
+    assert "Could not write" not in out and "Traceback" not in os.fsdecode(proc.stderr)
+    assert_result_files(d, str(d / "0000" / "temp_1.bin"))
 
 
 def test_long_directories_still_write_result_files(run_main, rec_tl, tmp_path):
