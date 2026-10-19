@@ -150,7 +150,9 @@ def test_worker_without_a_sink_records_nothing(iotest_mod, work_dir, monkeypatch
     results = []
     iotest_mod.worker(2, 1024, str(work_dir), results, "write", "0", True, True, 0)
     iotest_mod.simultaneous_role_worker("write", 2, 1024, str(work_dir), "t", "0", results, True, True, 0)
-    assert len(results) == 4
+    # one results record each
+    assert len(results) == 2
+    assert len(list(iotest_mod.result_samples(results))) == 4
 
 
 def unpack(record):
@@ -168,7 +170,7 @@ def test_worker_hands_over_one_compact_record(iotest_mod, work_dir):
     (record,) = sink
     counter, ops, file_indexes, starts, durations, errors = unpack(record)
     assert counter == "0" and errors == {}
-    assert [iotest_mod.TIMELINE_OPS[code] for code in ops] == ["write", "move", "stat", "read"] * 3
+    assert [iotest_mod.OP_NAMES[code] for code in ops] == ["write", "move", "stat", "read"] * 3
     assert file_indexes == [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]
     assert starts == sorted(starts)
     assert all(d >= 0 for d in durations)

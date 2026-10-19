@@ -643,9 +643,34 @@ def int_to_color(n, brightness_threshold=500):
 		return int_to_color(hash_value, brightness_threshold)
 	return (r, g, b)
 
-# the timeline's op column; workers store an op as its index here, in one byte
-TIMELINE_OPS = ('write', 'read', 'move', 'stat', 'index', 'create', 'unlink')
-TIMELINE_OP_CODES = {op: code for code, op in enumerate(TIMELINE_OPS)}
+# op names; workers store an op as its index here, in one byte (the timeline's op column, random's result kinds)
+OP_NAMES = ('write', 'read', 'move', 'stat', 'index', 'create', 'unlink')
+OP_CODES = {op: code for code, op in enumerate(OP_NAMES)}
+
+def results_record(samples, kinds=None):
+	# one worker's results of one pass, handed to the parent as one compact record: the durations as the
+	# bytes of an array('d'), a failed op's as NaN with its error text in errors, and each op's kind (an
+	# OP_CODES byte) when the pass mixes them. Built after the last op, from the list the ops appended to
+	try:
+		durations = array.array('d', samples)
+		errors = {}
+	except TypeError:
+		# some op failed: op_time() gave its error text
+		errors = {position: sample for position, sample in enumerate(samples) if isinstance(sample, str)}
+		durations = array.array('d', (math.nan if isinstance(sample, str) else sample for sample in samples))
+	return (durations.tobytes(), None if kinds is None else bytes(kinds), errors)
+
+def result_samples(records, kind=None, every=1, offset=0):
+	# the records' ops in arrival order as op_time() gave them (the duration, or the error text of a failed
+	# op): all of them, every n-th from offset (comprehensive's write, move, stat and read of each file),
+	# or those of one kind (random)
+	for durations, kinds, errors in records:
+		samples = memoryview(durations).cast('d').tolist()
+		for position, error in errors.items():
+			samples[position] = error
+		if kind is not None:
+			samples = [sample for sample, sample_kind in zip(samples, kinds) if sample_kind == kind]
+		yield from samples[offset::every]
 
 class OpTimeline:
 	# one worker's ops of one pass in typed arrays (21 bytes an op), handed to the parent as one record
@@ -669,7 +694,7 @@ class OpTimeline:
 		else:
 			self.starts.append(start - self.base)
 			self.durations.append(end - start)
-		self.ops.append(TIMELINE_OP_CODES[op])
+		self.ops.append(OP_CODES[op])
 		self.file_indexes.append(file_index)
 
 	def record(self):
@@ -685,7 +710,9 @@ def worker_color_log(color, msg, quiet=False):
 	worker_log(f'\033[38;2;{r};{g};{b}m{msg}\033[0m', quiet=quiet)
 
 def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False, late_starts=None, progress_to_stderr=False, timeline=None, block_size=None, verify=False):
+	# the ops append to a list as they go; it becomes one compact record after the last
 	local_results = []
+	local_kinds = [] if mode == 'random' else None
 	# only with --timeline; without it the loop below does no timeline work beyond a None check
 	local_timeline = OpTimeline(counter, thread_start_time, file_count) if timeline is not None else None
 	log = functools.partial(worker_color_log, int_to_color(os.getpid()), quiet=quiet)
@@ -745,14 +772,16 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				if local_timeline is not None:
 					local_timeline.add('write', file_index, attempt, op_result)
 				write_time = op_time(op_result)
-				local_results.append(('write', write_time))
+				local_results.append(write_time)
+				local_kinds.append(OP_CODES['write'])
 				log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\t{format_op(write_time)}")
 			else:
 				op_result = read_file(file_name, None, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
 				if local_timeline is not None:
 					local_timeline.add('read', file_index, attempt, op_result)
 				read_time = op_time(op_result)
-				local_results.append(('read', read_time))
+				local_results.append(read_time)
+				local_kinds.append(OP_CODES['read'])
 				log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\t{format_op(read_time)}")
 		elif mode == 'comprehensive':
 			resultList = []
@@ -784,7 +813,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 			except OSError:
 				pass
 			log(f'[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tW: {format_op(resultList[0], ".4f")} M: {format_op(resultList[1], ".4f")} S: {format_op(resultList[2], ".4f")} R: {format_op(resultList[3], ".4f")}')
-			local_results.append(resultList)
+			local_results.extend(resultList)
 		elif mode == 'index':
 			# This will test the indexing performance of the filesystem
 			op_result = index_file(file_name, quiet)
@@ -804,7 +833,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 	if mode == 'meta_unlink':
 		remove_meta_dir(meta_dir)
 	log(f'Worker {counter} finished.')
-	results.extend(local_results)
+	results.append(results_record(local_results, local_kinds))
 	if local_timeline is not None:
 		# one record per worker and pass, so the manager sees one append, not one per op
 		timeline.append(local_timeline.record())
@@ -1024,7 +1053,7 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 			local_results.append(op)
 			log(f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tRead\t{format_op(op)}")
 	log(f'Worker {counter} ({role}) finished.')
-	results.extend(local_results)
+	results.append(results_record(local_results))
 	if local_timeline is not None:
 		# one record per worker and pass, so the manager sees one append, not one per op
 		timeline.append(local_timeline.record())
@@ -1118,9 +1147,11 @@ def addToDicWithoutOverwrite(dic,key,value):
 def add_op_results(outResults, failedOps, key, samples):
 	# failed ops carry their error text instead of a duration (see op_time).
 	# Always add to both dicts so repeated keys get renamed in lockstep.
-	times = [s for s in samples if not isinstance(s, str)]
+	times, failed = [], []
+	for sample in samples:
+		(failed if isinstance(sample, str) else times).append(sample)
 	addToDicWithoutOverwrite(outResults, key, times)
-	addToDicWithoutOverwrite(failedOps, key, [s for s in samples if isinstance(s, str)])
+	addToDicWithoutOverwrite(failedOps, key, failed)
 	return times
 
 def record_pass_meta(late_starts, sync_estimated, key, late, estimated):
@@ -1267,19 +1298,20 @@ def memory_copies(modes, read_recreates=False):
 OPS_PER_FILE = {'write': 1, 'read': 1, 'random': 1, 'index': 1, 'comprehensive': 4, 'meta': 3, 'simultaneous': 1}
 
 # memory per op performed, by mode, in the parent and the manager process together. Every run keeps each
-# op's result until it ends; while a pass is collected the manager holds all of it and pickles it in one
-# go, and the parent holds it as fetched and as sorted into result keys. --timeline adds the op's record:
-# 21 bytes in arrays, plus the copies made handing a pass over. Measured as the slope of their peak RSS
-# (VmHWM) from -fc 25000 to 75000 at -pc 8 with 1 KiB files (Python 3.13, Linux, fork, 4 runs per mode).
-# Results: meta 63-79 bytes an op (the manager holds one of its three passes at a time), write, read and
-# index 115-130, simultaneous 135-147, comprehensive 174-184 (a list of 4 per file), random 285-319 (a
-# (kind, time) tuple per op). The timeline: 36-56 more for meta, 35-75 for the others. Each figure is the
-# largest slope plus about 20 %; write, read and index, which return the same one float per op, share the
-# largest of theirs. Failed ops' error texts (100-200 bytes each) are not counted.
-RESULT_BYTES_PER_OP = {'write': 160, 'read': 160, 'index': 160, 'simultaneous': 180, 'comprehensive': 230,
-	'random': 390, 'meta': 100}
-TIMELINE_BYTES_PER_OP = {'write': 90, 'read': 90, 'index': 90, 'simultaneous': 90, 'comprehensive': 80,
-	'random': 80, 'meta': 70}
+# op's result until it ends: workers hand a pass's over as compact records (8 bytes an op), which the manager
+# holds until the parent fetches them in one go, and the parent keeps them as the float lists of the result
+# dict (about 32 bytes an op). --timeline adds the op's record: 21 bytes in arrays, plus the copies made
+# handing a pass over. Measured as the slope of their peak RSS (VmHWM) from -fc 25000 to 75000 at -pc 8 with
+# 1 KiB files (Python 3.13, Linux, fork, 3 runs per mode). Results: meta 50-63 bytes an op (the manager holds
+# one of its three passes at a time), write, read, index, random and comprehensive 79-85, simultaneous
+# 100-110. The timeline: 36-56 more for meta, 35-90 for the others (also counting the runs before results
+# became records, as its own path did not change). Each figure is the largest slope plus about 20 %, rounded
+# up to 10; write, read and index, which return the same one float per op, share the largest of theirs.
+# Failed ops' error texts (100-200 bytes each) are not counted.
+RESULT_BYTES_PER_OP = {'write': 110, 'read': 110, 'index': 110, 'simultaneous': 140, 'comprehensive': 100,
+	'random': 110, 'meta': 80}
+TIMELINE_BYTES_PER_OP = {'write': 110, 'read': 110, 'index': 110, 'simultaneous': 100, 'comprehensive': 110,
+	'random': 110, 'meta': 70}
 
 def memory_per_process(modes, buffer_size, file_count, read_recreates=False, timeline=False):
 	# a worker's data buffers, plus what the parent and the manager keep for every op it performs over the run
@@ -1393,7 +1425,7 @@ def timeline_ops(record):
 	durations = memoryview(durations).cast('d')
 	for position, start in enumerate(starts):
 		failed = position in errors
-		yield (start, TIMELINE_OPS[ops[position]], counter, file_indexes[position],
+		yield (start, OP_NAMES[ops[position]], counter, file_indexes[position],
 			None if failed else durations[position], errors[position] if failed else '')
 
 def write_timeline(timeline_passes):
@@ -1776,8 +1808,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					# one bulk fetch per list: iterating a proxy costs a round trip per item
 					write_results, read_results = write_results[:], read_results[:]
 					write_late, read_late = write_late[:], read_late[:]
-					add_op_results(outResults, failedOps, 'write', write_results + dead_worker_errors(write_processes, file_count))
-					add_op_results(outResults, failedOps, 'read', read_results + dead_worker_errors(read_processes, file_count))
+					add_op_results(outResults, failedOps, 'write', itertools.chain(result_samples(write_results), dead_worker_errors(write_processes, file_count)))
+					add_op_results(outResults, failedOps, 'read', itertools.chain(result_samples(read_results), dead_worker_errors(read_processes, file_count)))
 					addToDicWithoutOverwrite(totalTime, 'write', write_sync_time)
 					addToDicWithoutOverwrite(totalTime, 'read', read_sync_time)
 					addToDicWithoutOverwrite(mode_process_counts, 'write', write_count)
@@ -1816,11 +1848,10 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			results, late = results[:], late[:]
 			collect_timeline(timeline_passes, pass_timeline, pass_index, 'meta' if mode.startswith('meta_') else mode)
 			if mode == 'comprehensive':
-				results = results + [[error] * 4 for error in dead_errors]
-				writes = add_op_results(outResults,failedOps,'write',[result[0] for result in results])
-				moves = add_op_results(outResults,failedOps,'move',[result[1] for result in results])
-				stats = add_op_results(outResults,failedOps,'stat',[result[2] for result in results])
-				reads = add_op_results(outResults,failedOps,'read',[result[3] for result in results])
+				# a worker's record holds each file's write, move, stat and read in turn
+				writes, moves, stats, reads = [add_op_results(outResults, failedOps, key,
+					itertools.chain(result_samples(results, every=4, offset=offset), dead_errors))
+					for offset, key in enumerate(('write', 'move', 'stat', 'read'))]
 				sumWTime = sum(writes)
 				sumMTime = sum(moves)
 				sumSTime = sum(stats)
@@ -1840,11 +1871,10 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					addToDicWithoutOverwrite(totalTime,'stat',totalEndTime)
 					addToDicWithoutOverwrite(totalTime,'read',totalEndTime)
 			elif mode == 'random':
-				# a result is (kind, time); dead workers never reported, so their kind is unknown
+				# each op's kind is in its worker's record; dead workers never reported, so their kind is unknown
 				for kind in ('write', 'read'):
-					kind_results = [r[1] for r in results if r[0] == kind]
-					if kind_results:
-						add_op_results(outResults,failedOps,'random_' + kind,kind_results)
+					if any(OP_CODES[kind] in kinds for _, kinds, _ in results):
+						add_op_results(outResults,failedOps,'random_' + kind,result_samples(results, kind=OP_CODES[kind]))
 						addToDicWithoutOverwrite(totalTime,'random_' + kind,totalEndTime)
 						addToDicWithoutOverwrite(mode_process_counts,'random_' + kind,process_count)
 						record_pass_meta(late_starts, sync_estimated, 'random_' + kind, late, False)
@@ -1854,7 +1884,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					addToDicWithoutOverwrite(mode_process_counts,'random',process_count)
 					record_pass_meta(late_starts, sync_estimated, 'random', late, False)
 			else:
-				add_op_results(outResults,failedOps,mode,results + dead_errors)
+				add_op_results(outResults,failedOps,mode,itertools.chain(result_samples(results), dead_errors))
 				addToDicWithoutOverwrite(totalTime,mode,totalEndTime)
 				addToDicWithoutOverwrite(mode_process_counts,mode,process_count)
 				record_pass_meta(late_starts, sync_estimated, mode, late, False)

@@ -162,7 +162,8 @@ def test_read_worker_holds_only_its_read_buffer(iotest_mod, work_dir):
 def test_read_worker_recreates_missing_files_on_demand(iotest_mod, work_dir):
     results = []
     iotest_mod.worker(2, 4096, str(work_dir), results, "read", "0", True, False, 0)
-    assert len(results) == 2 and not any(isinstance(r, str) for r in results)
+    samples = list(iotest_mod.result_samples(results))
+    assert len(samples) == 2 and not any(isinstance(s, str) for s in samples)
     assert [p.stat().st_size for p in sorted((work_dir / "0").glob("temp_*.bin"))] == [4096, 4096]
 
 

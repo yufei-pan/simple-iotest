@@ -33,12 +33,10 @@ def worker_files(work_dir, count=2):
     return [(work_dir / "0" / f"temp_{i}.bin").read_bytes() for i in range(1, count + 1)]
 
 
-def failures(results):
-    # random results are (kind, time), comprehensive ones [write, move, stat, read]
-    flat = []
-    for r in results:
-        flat.extend(r[1:] if isinstance(r, tuple) else r if isinstance(r, list) else [r])
-    return [r for r in flat if isinstance(r, str)]
+def worker_samples(iotest_mod, results):
+    # a worker hands over one compact record per pass; comprehensive's holds a write, move, stat and read per file
+    (record,) = results
+    return list(iotest_mod.result_samples([record]))
 
 
 def traced_peak(fn, *args, **kwargs):
@@ -224,7 +222,9 @@ def test_workers_hold_block_sized_buffers(iotest_mod, work_dir, mode):
     # a whole-file buffer alone would be 4 MiB (comprehensive and random hold two)
     peak = traced_peak(iotest_mod.worker, 2, 4 * MiB, str(work_dir), results, mode, "0", True, False, 0,
         block_size=64 * KiB)
-    assert len(results) == 2 and failures(results) == []
+    samples = worker_samples(iotest_mod, results)
+    assert len(samples) == (8 if mode == "comprehensive" else 2)
+    assert not [s for s in samples if isinstance(s, str)]
     assert peak < 1 * MiB
 
 
@@ -235,7 +235,8 @@ def test_simultaneous_and_layout_workers_hold_block_sized_buffers(iotest_mod, wo
         results = []
         peaks.append(traced_peak(iotest_mod.simultaneous_role_worker, role, 2, 4 * MiB, str(work_dir), "t", "0",
             results, True, False, 0, block_size=64 * KiB))
-        assert len(results) == 2 and failures(results) == []
+        samples = worker_samples(iotest_mod, results)
+        assert len(samples) == 2 and not [s for s in samples if isinstance(s, str)]
     assert all(peak < 1 * MiB for peak in peaks), peaks
     worker_dir = work_dir / ".iotest_simul_t" / "worker_0"
     assert sorted(p.stat().st_size for p in worker_dir.iterdir()) == [4 * MiB] * 4
