@@ -49,6 +49,10 @@ def test_comprehensive_records_hold_four_ops_per_file(iotest_mod):
     other = iotest_mod.results_record([9.0, 10.0, 11.0, 12.0])
     per_key = [samples_of(iotest_mod, [record, other], every=4, offset=offset) for offset in range(4)]
     assert per_key == [[1.0, 5.0, 9.0], [2.0, 6.0, 10.0], [3.0, "stat failed", 11.0], [4.0, 8.0, 12.0]]
+    # failures at the first and the last offset land in their own key, in place
+    edges = iotest_mod.results_record(["write failed", 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, "read failed"])
+    per_key = [samples_of(iotest_mod, [edges], every=4, offset=offset) for offset in range(4)]
+    assert per_key == [["write failed", 5.0], [2.0, 6.0], [3.0, 7.0], [4.0, "read failed"]]
 
 
 def test_add_op_results_takes_the_samples_in_one_pass(iotest_mod):

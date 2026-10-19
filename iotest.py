@@ -663,14 +663,19 @@ def results_record(samples, kinds=None):
 def result_samples(records, kind=None, every=1, offset=0):
 	# the records' ops in arrival order as op_time() gave them (the duration, or the error text of a failed
 	# op): all of them, every n-th from offset (comprehensive's write, move, stat and read of each file),
-	# or those of one kind (random)
+	# or those of one kind (random). Only the selected ops are converted, so taking a pass key by key
+	# converts each duration once
 	for durations, kinds, errors in records:
-		samples = memoryview(durations).cast('d').tolist()
-		for position, error in errors.items():
-			samples[position] = error
-		if kind is not None:
-			samples = [sample for sample, sample_kind in zip(samples, kinds) if sample_kind == kind]
-		yield from samples[offset::every]
+		durations = memoryview(durations).cast('d')
+		if kind is None:
+			samples = durations[offset::every].tolist()
+			for position, error in errors.items():
+				if position >= offset and (position - offset) % every == 0:
+					samples[(position - offset) // every] = error
+		else:
+			samples = [errors[position] if position in errors else durations[position]
+				for position, op_kind in enumerate(kinds) if op_kind == kind]
+		yield from samples
 
 class OpTimeline:
 	# one worker's ops of one pass in typed arrays (21 bytes an op), handed to the parent as one record
@@ -1307,7 +1312,10 @@ OPS_PER_FILE = {'write': 1, 'read': 1, 'random': 1, 'index': 1, 'comprehensive':
 # 100-110. The timeline: 36-56 more for meta, 35-90 for the others (also counting the runs before results
 # became records, as its own path did not change). Each figure is the largest slope plus about 20 %, rounded
 # up to 10; write, read and index, which return the same one float per op, share the largest of theirs.
-# Failed ops' error texts (100-200 bytes each) are not counted.
+# These cover the parent and the manager only: each worker's own memory for its pass (its result list, the
+# hand-over copies, and with --timeline the timeline arrays) is not counted separately, since it peaks
+# before the parent decodes that pass, and the ~20 % margin covers it; account for it before tightening
+# these. Failed ops' error texts (100-200 bytes each) are not counted.
 RESULT_BYTES_PER_OP = {'write': 110, 'read': 110, 'index': 110, 'simultaneous': 140, 'comprehensive': 100,
 	'random': 110, 'meta': 80}
 TIMELINE_BYTES_PER_OP = {'write': 110, 'read': 110, 'index': 110, 'simultaneous': 100, 'comprehensive': 110,
