@@ -54,7 +54,7 @@ def test_read_file_reads_into_the_given_buffer(iotest_mod, tmp_path):
     target = tmp_path / "f.bin"
     target.write_bytes(content)
     buffer = bytearray(2500)
-    op = iotest_mod.op_time(iotest_mod.read_file(str(target), content, 2500, quiet=True, buffer=buffer))
+    op = iotest_mod.op_time(iotest_mod.read_file(str(target), 2500, quiet=True, buffer=buffer))
     assert not isinstance(op, str), op
     assert bytes(buffer) == content
 

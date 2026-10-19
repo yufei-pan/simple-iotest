@@ -263,7 +263,7 @@ def test_read_file_reads_the_whole_file_in_block_sized_calls(iotest_mod, tmp_pat
     sizes = []
     spy_calls(monkeypatch, iotest_mod, "readv", REAL_READV, sizes)
     buffer = bytearray(1000)
-    op = iotest_mod.op_time(iotest_mod.read_file(str(target), None, 2500, quiet=True, buffer=buffer, block_size=1000))
+    op = iotest_mod.op_time(iotest_mod.read_file(str(target), 2500, quiet=True, buffer=buffer, block_size=1000))
     assert not isinstance(op, str), op
     assert sizes == [1000, 1000, 500]
     assert bytes(buffer[:500]) == content[2000:]
@@ -278,7 +278,7 @@ def test_blocks_larger_than_max_io_chunk_are_still_split(iotest_mod, tmp_path, m
     spy_calls(monkeypatch, iotest_mod, "writev", REAL_WRITEV, sizes)
     spy_calls(monkeypatch, iotest_mod, "readv", REAL_READV, sizes)
     iotest_mod.create_file(str(target), content, 2500, quiet=True, block_size=1000)
-    iotest_mod.read_file(str(target), None, 2500, quiet=True, block_size=1000)
+    iotest_mod.read_file(str(target), 2500, quiet=True, block_size=1000)
     assert sizes == [512, 488, 512, 488, 500] * 2
 
 
@@ -300,7 +300,7 @@ def test_chunked_io_finishes_short_transfers(iotest_mod, tmp_path, monkeypatch):
     monkeypatch.setattr(iotest_mod.os, "writev", short_writev)
     monkeypatch.setattr(iotest_mod.os, "readv", short_readv)
     write = iotest_mod.op_time(iotest_mod.create_file(str(target), block, 2500, quiet=True, block_size=1000))
-    read = iotest_mod.op_time(iotest_mod.read_file(str(target), None, 2500, quiet=True, block_size=1000))
+    read = iotest_mod.op_time(iotest_mod.read_file(str(target), 2500, quiet=True, block_size=1000))
     assert not isinstance(write, str), write
     assert not isinstance(read, str), read
     assert target.read_bytes() == block * 2 + block[:500]
@@ -324,7 +324,7 @@ def test_a_stalled_chunk_names_the_bytes_moved_across_blocks(iotest_mod, tmp_pat
     if op == "write":
         result = iotest_mod.create_file(str(target), b"\x01" * 1000, 2500, quiet=True, block_size=1000)
     else:
-        result = iotest_mod.read_file(str(target), None, 2500, quiet=True, block_size=1000)
+        result = iotest_mod.read_file(str(target), 2500, quiet=True, block_size=1000)
     error = iotest_mod.op_time(result)
     assert isinstance(error, str)
     assert "after 1000 of 2500 bytes" in error

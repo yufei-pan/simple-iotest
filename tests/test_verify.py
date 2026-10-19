@@ -58,7 +58,7 @@ def test_the_trailer_is_the_crc_of_the_bytes_before_it(iotest_mod, tmp_path, blo
         data = target.read_bytes()
         assert len(data) == 2500
         assert stored_crc(data) == computed_crc(data)
-        op = iotest_mod.op_time(iotest_mod.read_file(str(target), None, 2500, quiet=True, block_size=block_size,
+        op = iotest_mod.op_time(iotest_mod.read_file(str(target), 2500, quiet=True, block_size=block_size,
             verify=True))
         assert not isinstance(op, str), op
 
@@ -157,7 +157,7 @@ def test_whole_file_crc_stays_outside_the_timed_write_and_read(iotest_mod, tmp_p
     assert content.write(target, 0, quiet=True) == (101, 102)
     assert marks == [100]
     marks.clear()
-    assert iotest_mod.read_file(target, None, 2500, quiet=True, verify=True) == (103, 104)
+    assert iotest_mod.read_file(target, 2500, quiet=True, verify=True) == (103, 104)
     assert marks == [105]
 
 
@@ -168,7 +168,7 @@ def test_chunked_crc_is_inside_the_timed_write_and_read(iotest_mod, tmp_path, mo
     start, end = content.write(target, 0, quiet=True)
     assert len(marks) == 3 and all(start < tick < end for tick in marks)
     marks.clear()
-    start, end = iotest_mod.read_file(target, None, 2500, quiet=True, block_size=1000, verify=True)
+    start, end = iotest_mod.read_file(target, 2500, quiet=True, block_size=1000, verify=True)
     assert len(marks) == 3 and all(start < tick < end for tick in marks)
 
 

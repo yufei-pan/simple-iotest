@@ -17,7 +17,13 @@ def in_error(path):
 @pytest.mark.parametrize("helper", ["create_file", "read_file"])
 def test_data_helpers_return_error_text_on_failure(iotest_mod, tmp_path, helper):
     blocker = block_with_dir(tmp_path / "f.bin")
-    op = iotest_mod.op_time(getattr(iotest_mod, helper)(str(blocker), b"\x00" * 64, 64, quiet=True))
+    if helper == "create_file":
+        result = iotest_mod.create_file(str(blocker), b"\x00" * 64, 64, quiet=True)
+    else:
+        # the read recreates the file it does not find, and that write fails
+        result = iotest_mod.read_file(str(blocker), 64, quiet=True,
+            recreate=lambda name: iotest_mod.create_file(name, b"\x00" * 64, 64, quiet=True))
+    op = iotest_mod.op_time(result)
     assert isinstance(op, str)
     assert in_error(blocker) in op
 
@@ -144,10 +150,35 @@ def test_dead_comprehensive_worker_fails_every_step(run_main, work_dir):
         "write": 2, "move": 2, "stat": 2, "read": 2}
 
 
-def test_failed_recreate_reports_the_write_error(iotest_mod, tmp_path, monkeypatch):
+def test_failed_recreate_reports_the_write_error(iotest_mod, tmp_path):
     # read_file recreates a missing file first; if that write fails, its error is the real cause
-    monkeypatch.setattr(iotest_mod, "create_file",
-        lambda *a, **k: (None, "OSError: [Errno 28] No space left on device"))
-    op = iotest_mod.op_time(iotest_mod.read_file(str(tmp_path / "missing.bin"), b"\x00" * 64, 64, quiet=True))
+    def recreate(file_name):
+        return None, "OSError: [Errno 28] No space left on device"
+
+    op = iotest_mod.op_time(iotest_mod.read_file(str(tmp_path / "missing.bin"), 64, quiet=True, recreate=recreate))
     assert isinstance(op, str)
     assert "No space left on device" in op
+
+
+@pytest.mark.parametrize("present", [None, 63, "dir"])
+def test_without_recreate_a_missing_or_wrong_size_file_fails_the_read(iotest_mod, tmp_path, present):
+    target = tmp_path / "f.bin"
+    if present == "dir":
+        target.mkdir()
+    elif present is not None:
+        target.write_bytes(b"\x01" * present)
+    op = iotest_mod.op_time(iotest_mod.read_file(str(target), 64, quiet=True))
+    assert op == f"{target} is missing or not 64 bytes"
+
+
+def test_a_read_checks_its_file_with_one_stat(iotest_mod, tmp_path, monkeypatch):
+    target = tmp_path / "f.bin"
+    target.write_bytes(b"\x01" * 64)
+    stats = []
+    real_stat = iotest_mod.os.stat
+    monkeypatch.setattr(iotest_mod.os, "stat", lambda *a, **k: stats.append(a[0]) or real_stat(*a, **k))
+    for name in ("isfile", "getsize"):
+        monkeypatch.setattr(iotest_mod.os.path, name, lambda *a: pytest.fail("a second stat"))
+    op = iotest_mod.op_time(iotest_mod.read_file(str(target), 64, quiet=True))
+    assert not isinstance(op, str), op
+    assert stats == [str(target)]

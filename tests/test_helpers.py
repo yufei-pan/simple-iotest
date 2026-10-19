@@ -195,7 +195,7 @@ def test_create_read_move_stat_index(iotest_mod, tmp_path):
     iotest_mod.create_file(str(src), content, len(content), quiet=True)
     assert src.is_file()
     assert src.stat().st_size == 64
-    iotest_mod.read_file(str(src), content, len(content), quiet=True)
+    iotest_mod.read_file(str(src), len(content), quiet=True)
     iotest_mod.stat_file(str(src), quiet=True)
     iotest_mod.move_file(str(src), str(dst), quiet=True)
     assert not src.exists()

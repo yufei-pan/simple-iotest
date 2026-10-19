@@ -71,7 +71,7 @@ def test_read_file_finishes_partial_reads(iotest_mod, tmp_path, monkeypatch):
         return n
 
     monkeypatch.setattr(iotest_mod.os, "readv", counting_short_readv)
-    op = iotest_mod.op_time(iotest_mod.read_file(str(target), content, len(content), quiet=True))
+    op = iotest_mod.op_time(iotest_mod.read_file(str(target), len(content), quiet=True))
     assert not isinstance(op, str), op
     assert sum(consumed) == 2500
 
@@ -81,7 +81,7 @@ def test_read_file_early_eof_is_a_failure(iotest_mod, tmp_path, monkeypatch):
     target = tmp_path / "f.bin"
     target.write_bytes(b"\x01" * 64)
     monkeypatch.setattr(iotest_mod.os, "readv", lambda fd, buffers: 0)
-    op = iotest_mod.op_time(iotest_mod.read_file(str(target), b"\x01" * 64, 64, quiet=True))
+    op = iotest_mod.op_time(iotest_mod.read_file(str(target), 64, quiet=True))
     assert isinstance(op, str)
     assert str(target) in op
 
@@ -107,7 +107,7 @@ def test_each_syscall_is_capped_at_max_io_chunk(iotest_mod, tmp_path, monkeypatc
     monkeypatch.setattr(iotest_mod.os, "writev", spy_writev)
     monkeypatch.setattr(iotest_mod.os, "readv", spy_readv)
     iotest_mod.create_file(str(target), content, len(content), quiet=True)
-    iotest_mod.read_file(str(target), content, len(content), quiet=True)
+    iotest_mod.read_file(str(target), len(content), quiet=True)
     assert target.read_bytes() == content
     assert requested == [1024, 1024, 452, 1024, 1024, 452]
 
@@ -125,6 +125,8 @@ def test_ctrl_c_during_io_is_not_swallowed(iotest_mod, tmp_path, monkeypatch, ca
         raise KeyboardInterrupt
 
     monkeypatch.setattr(iotest_mod.os, call, interrupted)
-    helper = iotest_mod.create_file if op == "write" else iotest_mod.read_file
     with pytest.raises(KeyboardInterrupt):
-        helper(str(target), b"\x01" * 64, 64, quiet=True)
+        if op == "write":
+            iotest_mod.create_file(str(target), b"\x01" * 64, 64, quiet=True)
+        else:
+            iotest_mod.read_file(str(target), 64, quiet=True)

@@ -538,23 +538,32 @@ def move_file(src, dst, quiet=False):
 		worker_log(traceback.format_exc(), level='error', quiet=quiet)
 		return None,f'{type(e).__name__}: {e}'
 
-def file_needs_recreate(file_name, file_size):
-	return not os.path.isfile(file_name) or os.path.getsize(file_name) != file_size
+def existing_size(path):
+	# one stat: the size of a regular file, 0 for anything else or nothing
+	try:
+		st = os.stat(path)
+	except OSError:
+		return 0
+	return st.st_size if stat.S_ISREG(st.st_mode) else 0
 
-def read_file(file_name, file_content, file_size, quiet=False, buffer=None, recreate=None, block_size=None, verify=False):
+def file_needs_recreate(file_name, file_size):
+	return existing_size(file_name) != file_size
+
+def read_file(file_name, file_size, quiet=False, buffer=None, recreate=None, block_size=None, verify=False):
 	# workers pass one reused buffer; a fresh one costs a zero-fill per read (~150 ms/GiB)
 	b = buffer if buffer is not None else bytearray(block_size or file_size)
-	# check if file exists and size is correct
+	# check if file exists and size is correct: one stat, inside the timed pass
 	try:
 		if file_needs_recreate(file_name, file_size):
-			# file does not exist or size is wrong, create it
+			if recreate is None:
+				# nothing to write it with: a failed read
+				error = f"{file_name} is missing or not {file_size} bytes"
+				worker_log(error, level='error', quiet=quiet)
+				return None, error
 			worker_log(f"File {file_name} does not exist or size is wrong, creating it...", level='error', quiet=quiet)
-			# workers pass recreate(file_name), which writes the file as they write theirs: read-only
-			# workers hold no content until a file actually has to be recreated
-			if recreate is not None:
-				created = recreate(file_name)
-			else:
-				created = create_file(file_name, file_content, file_size, quiet=quiet, block_size=block_size)
+			# workers pass recreate(file_name), which writes the file as they write theirs (stamped and sealed for
+			# --verify): read-only workers hold no content until a file actually has to be recreated
+			created = recreate(file_name)
 			if created[0] is None:
 				# report why the file is missing, not the read error that would follow
 				return None, f"recreating missing {file_name}: {created[1]}"
@@ -816,7 +825,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 			local_results.append(write_time)
 			log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\t{format_op(write_time)}")
 		elif mode == 'read':
-			op_result = read_file(file_name, None, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
+			op_result = read_file(file_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
 			if local_timeline is not None:
 				local_timeline.add('read', file_index, attempt, op_result)
 			read_time = op_time(op_result)
@@ -833,7 +842,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				local_kinds.append(OP_CODES['write'])
 				log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\t{format_op(write_time)}")
 			else:
-				op_result = read_file(file_name, None, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
+				op_result = read_file(file_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
 				if local_timeline is not None:
 					local_timeline.add('read', file_index, attempt, op_result)
 				read_time = op_time(op_result)
@@ -861,7 +870,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				worker_log(f'{bcolors.critical}File {file_name} size is wrong, expected {file_size}, got {size}\033[0m', level='error', quiet=quiet)
 			resultList.append(op_time(stat_result))
 			attempt = time.perf_counter() if local_timeline is not None else None
-			op_result = read_file(moved_name, None, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
+			op_result = read_file(moved_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
 			if local_timeline is not None:
 				local_timeline.add('read', file_index, attempt, op_result)
 			resultList.append(op_time(op_result))
@@ -915,13 +924,6 @@ def worker_files(directories, process_count, file_count):
 	for directory, counter_name in worker_dirs(directories, process_count):
 		for index in range(file_count):
 			yield directory, counter_name, worker_file_path(directory, counter_name, index, file_count)
-
-def existing_size(path):
-	try:
-		st = os.stat(path)
-	except OSError:
-		return 0
-	return st.st_size if stat.S_ISREG(st.st_mode) else 0
 
 def scan_worker_files(directories, process_count, file_count, file_size):
 	# the plain workers' temp files as the run finds them, one os.stat per file: per worker, in counter order,
@@ -1140,7 +1142,7 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 			local_results.append(op)
 			log(f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tWrote\t{format_op(op)}")
 		else:
-			op_result = read_file(file_name, None, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
+			op_result = read_file(file_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
 			if local_timeline is not None:
 				local_timeline.add('read', i + 1, attempt, op_result)
 			op = op_time(op_result)

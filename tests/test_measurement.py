@@ -53,7 +53,7 @@ def test_f_nocache_is_set_when_the_constant_exists(iotest_mod, tmp_path, monkeyp
     if op == "write":
         iotest_mod.create_file(str(target), b"\x01" * 64, 64, quiet=True)
     else:
-        iotest_mod.read_file(str(target), b"\x01" * 64, 64, quiet=True)
+        iotest_mod.read_file(str(target), 64, quiet=True)
     assert seen == [(48, 1)]
 
 
