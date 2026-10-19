@@ -77,6 +77,19 @@ def test_meta_cleanup_removes_leftover_meta_dirs(run_main, work_dir):
     assert not (work_dir / "0000").exists()
 
 
+def test_cleanup_after_a_meta_only_run_leaves_the_temp_files_alone(run_main, iotest_mod, work_dir, monkeypatch):
+    # -pc 64 -fc 100000 meta -cl tried 6.4 million unlinks of temp files no pass had used
+    run_main(["write"], file_count=2)
+    monkeypatch.setattr(iotest_mod, "cleanup_worker_files", lambda *a: pytest.fail("temp files cleaned up"))
+    run_main(["meta"], file_count=2, cleanup=True)
+    assert sorted(p.name for p in (work_dir / "0000").iterdir()) == ["temp_1.bin", "temp_2.bin"]
+
+
+def test_cleanup_after_write_and_meta_removes_both(run_main, work_dir):
+    run_main(["write", "meta"], file_count=2, cleanup=True)
+    assert list(work_dir.iterdir()) == []
+
+
 def test_meta_reserves_no_memory(iotest_mod):
     assert iotest_mod.buffer_memory(["meta"], 1024, 1024) == 0
     assert iotest_mod.buffer_memory(["write", "meta"], 1024, 1024) == 1024

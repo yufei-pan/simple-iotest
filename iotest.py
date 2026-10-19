@@ -1044,6 +1044,9 @@ def check_free_space(needed_by_dir, tl, mountinfo_lines=None, cow_extra=None):
 # of other runs' workers beyond them
 largest_worker_run = 0
 
+# the modes whose passes use the plain workers' temp files (index makes its folders next to them)
+WORKER_FILE_MODES = ('write', 'read', 'random', 'comprehensive', 'index')
+
 def note_worker_run(process_count):
 	global largest_worker_run
 	largest_worker_run = max(largest_worker_run, process_count)
@@ -1863,7 +1866,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		sys.exit(1)
 	# recorded before any worker writes, so -cl after tuning also covers an attempt that
 	# never finished (Ctrl+C, a failing report write, ...)
-	if any(mode in ('write', 'read', 'random', 'comprehensive', 'index') for mode in modes):
+	if any(mode in WORKER_FILE_MODES for mode in modes):
 		note_worker_run(process_count)
 	if phyFreeMemory > 0 and estimatedTotalMemory > phyFreeMemory * 0.9:
 		tl.teeerror("Estimated total memory usage is more than 90% of the total non swap available memory.")
@@ -2159,7 +2162,10 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	if options.json_path:
 		write_json_summary(options.json_path, build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors, start_late), tl, report_errors)
 	if options.cleanup:
-		cleanup_worker_files(directories, process_count, file_count)
+		# only after passes that use the temp files: -pc 64 -fc 100000 meta would otherwise try 6.4 million
+		# unlinks of files that never existed. Meta passes clean up their own directories
+		if any(mode in WORKER_FILE_MODES for mode in modes):
+			cleanup_worker_files(directories, process_count, file_count)
 		if 'meta' in modes:
 			cleanup_meta_dirs(directories, process_count)
 	if options.message_end_point_address and short_reports:
