@@ -92,7 +92,13 @@ def test_simultaneous_reader_reuses_one_read_buffer(iotest_mod, work_dir, monkey
     "modes,read_recreates,copies",
     [
         (["write"], False, 1),
-        (["index"], False, 1),
+        # index and meta move no data
+        (["index"], False, 0),
+        (["meta"], False, 0),
+        (["index", "meta"], False, 0),
+        (["index", "write"], False, 1),
+        (["meta", "read"], True, 2),
+        # the generation benchmark's processes each hold a buffer
         (["benchmark"], False, 1),
         # read workers hold only their read buffer, unless they have files to recreate
         (["read"], False, 1),
@@ -429,3 +435,25 @@ def test_scan_worker_files(iotest_mod, work_dir):
     # a directory where a file belongs holds no bytes and is not the file
     os.makedirs(iotest_mod.worker_file_path(dirs[1], "0003", 0, 2))
     assert iotest_mod.scan_worker_files(dirs, 4, 2, 100) == [(200, 0), (100, 1), (130, 1), (0, 2)]
+
+
+def test_every_mode_has_its_buffer_count(iotest_mod):
+    assert set(iotest_mod.BUFFER_COPIES) == set(iotest_mod.OPS_PER_FILE) | {"benchmark"}
+
+
+def test_index_and_meta_runs_reserve_no_buffer_memory(iotest_mod):
+    result = iotest_mod.RESULT_BYTES_PER_OP
+    for modes in (["index"], ["meta"], ["index", "meta"]):
+        ops = sum(iotest_mod.OPS_PER_FILE[mode] * result[mode] for mode in modes)
+        # only the per-op figures, however large the files would be
+        assert iotest_mod.memory_per_process(modes, 2 ** 30, 10) == pytest.approx(10 * ops)
+
+
+def test_index_only_run_is_not_cut_for_buffers_it_never_holds(run_main, iotest_mod, monkeypatch):
+    # 4 workers' results fit; one 64 MiB buffer would not
+    per_process = iotest_mod.memory_per_process(["index"], 64 * MiB, 10)
+    assert per_process < 64 * MiB
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (int(4 * per_process) + 1, 0))
+    result = run_main(["index"], process_count=4, file_count=10, file_size=64 * MiB)
+    assert result["process_count"] == 4

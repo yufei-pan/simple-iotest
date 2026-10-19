@@ -1350,15 +1350,16 @@ def read_pass_recreates(modes, scan, process_count):
 				passes[index] = [not left] * process_count
 	return passes
 
+# data buffers a worker holds in a pass of each mode: its file content (writers, and the generation benchmark's
+# processes), its read buffer (readers, simultaneous ones included), or both. Index and meta passes move no data
+BUFFER_COPIES = {'write': 1, 'read': 1, 'random': 2, 'comprehensive': 2, 'simultaneous': 1, 'benchmark': 1,
+	'index': 0, 'meta': 0}
+
 def memory_copies(modes, read_recreates=False):
-	# each worker holds one buffer: its file content (writers) or its read buffer (readers,
-	# simultaneous ones included). Workers that also write or recreate files hold both.
-	if 'meta' in modes and all(mode in ('meta', 'index') for mode in modes):
-		# metadata passes hold no data
-		return 0
-	if any(mode in ('random', 'comprehensive') for mode in modes) or ('read' in modes and read_recreates):
-		return 2
-	return 1
+	# the most buffers a worker holds at once, in any of its passes: a read worker that recreates files also
+	# holds their content
+	return max((BUFFER_COPIES.get(mode, 0) + (1 if mode == 'read' and read_recreates else 0) for mode in modes),
+		default=0)
 
 # ops each process performs per file in each mode (meta is three passes of one op)
 OPS_PER_FILE = {'write': 1, 'read': 1, 'random': 1, 'index': 1, 'comprehensive': 4, 'meta': 3, 'simultaneous': 1}
