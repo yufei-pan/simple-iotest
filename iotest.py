@@ -1669,9 +1669,11 @@ def summarize_key(times, failed, effective_pc, total_time, file_size, has_bytes)
 def format_key_report(mode, stats, late, estimated, zeros, dedup_notes, planned_ops=None):
 	# planned_ops: the read files of a failed simultaneous layout pass, whose writes are not timed
 	report = ["*"*80, f"Report for {mode} mode:"]
-	if zeros:
-		report.append("Warning! Using zeros for file content. Compressed filesystems will show optimistic results.")
-	report.extend(dedup_notes)
+	# the content warnings are about timed results, which a layout section has none of
+	if planned_ops is None:
+		if zeros:
+			report.append("Warning! Using zeros for file content. Compressed filesystems will show optimistic results.")
+		report.extend(dedup_notes)
 	op_count = stats['ops'] + stats['failed'] if planned_ops is None else planned_ops
 	if stats['failed']:
 		report.append(f"Failed {mode} ops:      \t{stats['failed']} of {op_count}, first error: {stats['first_error']}")

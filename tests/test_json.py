@@ -128,6 +128,20 @@ def test_format_key_report_on_fixed_statistics(iotest_mod):
     ]
 
 
+def test_layout_section_has_no_content_warnings(iotest_mod):
+    stats = iotest_mod.summarize_key([], ["boom"], 2, None, 1024, True)
+    report = iotest_mod.format_key_report("layout", stats, (0, 0.0), None, True, ["Note: dedup"], planned_ops=6)
+    assert report == [
+        "*" * 80,
+        "Report for layout mode:",
+        "Failed layout ops:      \t1 of 6, first error: boom",
+        "Layout writes are not timed, and the timed simultaneous pass did not run.",
+        "-" * 80,
+    ]
+    write = iotest_mod.format_key_report("write", stats, (0, 0.0), None, True, ["Note: dedup"])
+    assert write[2:4] == ["Warning! Using zeros for file content. Compressed filesystems will show optimistic results.", "Note: dedup"]
+
+
 def test_summarize_key_does_not_reorder_its_input(iotest_mod):
     times = [0.3, 0.1, 0.2, 0.5, 0.4]
     stats = iotest_mod.summarize_key(times, [], 1, 1.0, 1024, True)
