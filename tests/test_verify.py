@@ -129,13 +129,17 @@ def tick_on_crc(iotest_mod, monkeypatch):
     return marks
 
 
-CHUNKED_SIZE = 2 * 2**20 + 100
+CHUNKED_POOL = 256 * 2**10
+CHUNKED_SIZE = 600 * 2**10 + 100
 
 
-# a data byte in the first chunk, one in the second round of the 1 MiB chunk pool, and one inside the trailer
-@pytest.mark.parametrize("position", [100, 2**20 + 5000, CHUNKED_SIZE - 2])
-def test_files_larger_than_the_chunk_pool_verify_and_a_flipped_byte_fails(run_main, iotest_mod, work_dir, position):
+@pytest.mark.patches_workers
+# a data byte in the first chunk, one in the second round of the chunk pool (shrunk to 256 KiB for the workers, so a
+# small file comes round it), and one inside the trailer
+@pytest.mark.parametrize("position", [100, CHUNKED_POOL + 5000, CHUNKED_SIZE - 2])
+def test_files_larger_than_the_chunk_pool_verify_and_a_flipped_byte_fails(run_main, iotest_mod, work_dir, monkeypatch, position):
     # the second file is written from the pool the first one's tags and trailer went into
+    monkeypatch.setattr(iotest_mod, "CHUNK_POOL_SIZE", CHUNKED_POOL)
     assert iotest_mod.content_size(CHUNKED_SIZE, 4096) < CHUNKED_SIZE
     result = run_main(["write", "read"], file_count=2, file_size=CHUNKED_SIZE, zeros=False, verify=True,
         block_size=4096)

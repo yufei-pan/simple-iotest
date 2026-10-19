@@ -333,8 +333,9 @@ def effective_block_size(block_size, file_size):
 
 # With -bs a worker writes the chunks of its files from one pool of file content, CHUNK_POOL_SIZE and one block (or
 # the file size if smaller), each chunk from its own place in it (chunk_span()): a file is not one block repeated,
-# which storage that compresses (ZFS, btrfs, arrays) would store in a fraction of the bytes, inflating the figures
-CHUNK_POOL_SIZE = 2**20
+# which storage that compresses (ZFS, btrfs, arrays) would store in a fraction of the bytes, inflating the figures.
+# 16 MiB is ZFS's largest recordsize, the largest unit any of them compresses on its own
+CHUNK_POOL_SIZE = 16 * 2**20
 
 def content_size(file_size, block_size):
 	# the file content a worker holds and writes from: the whole file, or with -bs its chunk pool
@@ -346,8 +347,8 @@ def chunk_span(buffer_size, block_size, file_size, stamped):
 	# each chunk starts in the buffer at its offset in the file modulo this: in a buffer that holds the file at
 	# its own place, in a one-block one at the start. In a chunk pool it is the number of places a whole block
 	# can start, CHUNK_POOL_SIZE + 1 (CHUNK_POOL_SIZE with -u), so a byte of the pool comes back in the file only
-	# a multiple of the span later: never twice within CHUNK_POOL_SIZE (a compression record), nor in consecutive
-	# chunks. One modulo per chunk is all the timed write does for it
+	# a multiple of the span later, at least 16 MiB: no compression record (ZFS's, up to 16 MiB; btrfs's, 128 KiB;
+	# an array's) contains a repeat, nor do consecutive chunks. One modulo per chunk is all the timed write does for it
 	if buffer_size >= file_size:
 		return max(file_size, 1)
 	span = buffer_size - block_size + 1
@@ -2630,7 +2631,7 @@ def climain():
 
 	parser = argparse.ArgumentParser(description="Test total disk bandwidth. Default mode is write (w). Comprehensive mode: write -> move -> stat -> read")
 	parser.add_argument("-fs","--file_size", type=size_arg, help="File size (default:30), defaults to mb, can specify in t(b),g(b),m(b),k(b),b", default=None)
-	parser.add_argument("-bs","--block_size", type=size_arg, help="Write and read each file in calls of this size instead of the whole file in one call (default): each worker reads into one buffer of this size and writes from a pool of 1 MiB of test data and one block, so the file does not repeat within any 1 MiB. Same units as -fs", default=None)
+	parser.add_argument("-bs","--block_size", type=size_arg, help="Write and read each file in calls of this size instead of the whole file in one call (default): each worker reads into one buffer of this size and writes from a pool of 16 MiB of test data and one block (or the file size), so the file does not repeat within any 16 MiB. Same units as -fs", default=None)
 	parser.add_argument("-fc","--file_count", type=positive_int, help="Number of files to create and read per process (default:50)",default=None)
 	parser.add_argument("-t",'-pc',"--process_count", type=positive_int, help="Number of processes to run concurrently (default:36)", default=None)
 	parser.add_argument("-ts","--total_size", type=size_arg, help="Total size target. If -fs/-fc/-pc is omitted, auto-calculate one missing arg to fit this total size.")
