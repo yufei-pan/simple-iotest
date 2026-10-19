@@ -34,7 +34,8 @@ def test_report_base_name_counts_bytes_not_characters(iotest_mod):
 
 
 # on Linux a name that is not UTF-8 reaches Python as surrogate escapes: -d $'/scratch/\xff' is '/scratch/\udcff'
-UNDECODABLE = os.fsdecode(b"\xff")
+# (os.fsdecode(b"\xff") there; written out because Windows' fsdecode refuses the byte at import)
+UNDECODABLE = "\udcff"
 linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux file names are bytes; others are Unicode")
 
 
