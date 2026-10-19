@@ -64,7 +64,7 @@ def test_cleanup_removes_worker_files_and_empty_dirs(run_main, work_dir):
 
 
 def test_cleanup_keeps_files_it_did_not_create(run_main, work_dir):
-    keep = work_dir / "0" / "notes.txt"
+    keep = work_dir / "0000" / "notes.txt"
     keep.parent.mkdir()
     keep.write_text("mine")
     run_main(["write"], file_count=2, cleanup=True)
@@ -80,7 +80,7 @@ def test_without_cleanup_files_stay_and_a_hint_is_printed(tmp_path):
     work = tmp_path / "w"
     proc = run_cli("-fs", "1k", "-fc", "2", "-pc", "2", "-d", str(work), "-nl", "-nr", "-z", "-bt", "1", "write")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert temp_files(work) == ["0/temp_1.bin", "0/temp_2.bin", "1/temp_1.bin", "1/temp_2.bin"]
+    assert temp_files(work) == ["0000/temp_1.bin", "0000/temp_2.bin", "0001/temp_1.bin", "0001/temp_2.bin"]
     assert "--cleanup" in proc.stdout
 
 
@@ -94,26 +94,24 @@ def test_tuning_with_cleanup_prints_no_cleanup_hint(tmp_path):
     assert "--cleanup" not in proc.stdout
 
 
-def test_leftover_hint_counts_only_the_given_runs(iotest_mod, work_dir):
-    for pc in (12, 3, 9):
-        for _, _, path in iotest_mod.worker_files([str(work_dir)], pc, 1):
-            Path(path).parent.mkdir(exist_ok=True)
-            Path(path).write_bytes(b"x")
-    # runs at 12 and 3 own 00..11 and 0..2; 3..8 belong to the -pc 9 run
-    assert "Left 15 test files" in iotest_mod.leftover_hint([str(work_dir)], [12, 3], 1)
+def test_leftover_hint_counts_only_the_runs_workers(iotest_mod, work_dir):
+    for _, _, path in iotest_mod.worker_files([str(work_dir)], 14, 1):
+        Path(path).parent.mkdir(exist_ok=True)
+        Path(path).write_bytes(b"x")
+    # a run at 12 used workers 0000..0011; 0012 and 0013 belong to another run
+    assert "Left 12 test files" in iotest_mod.leftover_hint([str(work_dir)], 12, 1)
 
 
-def test_leftover_hint_counts_files_shared_by_two_runs_once(iotest_mod, tmp_path):
+def test_leftover_hint_covers_every_directory(iotest_mod, tmp_path):
     dirs = [str(tmp_path / "a"), str(tmp_path / "b")]
-    # -pc 4 and -pc 2 both use workers 0 and 1, so their files are the same ones
     for _, _, path in iotest_mod.worker_files(dirs, 4, 2):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(b"x" * 100)
-    hint = iotest_mod.leftover_hint(dirs, [4, 2], 2)
+    hint = iotest_mod.leftover_hint(dirs, 4, 2)
     assert hint == "Left 8 test files (%sB) in %s; use -cl/--cleanup to remove them." % (
         iotest_mod.format_bytes(800), ", ".join(dirs))
     # -fc 10 names its files temp_01..temp_10
-    assert iotest_mod.leftover_hint(dirs, [4], 10) is None
+    assert iotest_mod.leftover_hint(dirs, 4, 10) is None
 
 
 def test_leftover_hint_does_not_hold_every_path(iotest_mod, work_dir):
@@ -122,7 +120,7 @@ def test_leftover_hint_does_not_hold_every_path(iotest_mod, work_dir):
         Path(path).write_bytes(b"x")
     tracemalloc.start()
     try:
-        hint = iotest_mod.leftover_hint([str(work_dir)], [4, 2], 500)
+        hint = iotest_mod.leftover_hint([str(work_dir)], 4, 500)
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
@@ -195,15 +193,15 @@ def test_tuning_cleans_up_only_after_the_last_attempt(run_main, iotest_mod, work
 
 
 def test_tuning_cleanup_keeps_files_of_other_runs(iotest_mod, work_dir, rec_tl, tiny):
-    # an earlier -pc 9 run left 0..8/temp_*.bin; tuning from -pc 12 runs attempts at 12 and 1,
-    # so -cl may remove 00..11 and 0 (rewritten by the pc=1 attempt) but not 1..8
-    for _, _, path in iotest_mod.worker_files([str(work_dir)], 9, 2):
+    # an earlier -pc 14 run left 0000..0013/temp_*.bin; tuning from -pc 12 runs attempts at 12 and 1,
+    # so -cl removes the files of workers 0000..0011 but not those of 0012 and 0013
+    for _, _, path in iotest_mod.worker_files([str(work_dir)], 14, 2):
         Path(path).parent.mkdir(exist_ok=True)
         Path(path).write_bytes(b"x" * 1024)
     options = iotest_mod.RunOptions(file_size=1024, file_count=2, process_count=12, directories=str(work_dir),
         modes=["write"], quiet=True, zeros=True, no_report=True, benchmark_time=tiny["benchmarkTime"], cleanup=True)
     iotest_mod.tune_for_targets(options, rec_tl, 1, None)
-    assert temp_files(work_dir) == [f"{c}/temp_{i}.bin" for c in range(1, 9) for i in (1, 2)]
+    assert temp_files(work_dir) == [f"{c:04d}/temp_{i}.bin" for c in (12, 13) for i in (1, 2)]
 
 
 def mountinfo_line(mount_point, fstype, source):
@@ -258,11 +256,10 @@ def test_disk_check_comes_before_the_memory_pause(run_main, iotest_mod, monkeypa
 def test_simultaneous_attempts_rely_on_the_tuners_upfront_check(iotest_mod, work_dir, rec_tl, monkeypatch):
     # attempts overwrite the writer files of earlier attempts, which still hold their space;
     # counting them again as new could stop tuning half way with a false "not enough space"
-    iotest_mod.run_simultaneous_layout(1, 1024, [str(work_dir)], "r", 1, 2, True, True, rec_tl)
+    iotest_mod.run_simultaneous_layout(1, 1024, [str(work_dir)], "r", 1, True, True, rec_tl)
     fake_free(iotest_mod, monkeypatch, 0)
     result = iotest_mod.main(1024, 1, 2, str(work_dir), ["simultaneous"], True, True, tl=rec_tl,
-        no_report=True, benchmarkTime=1, simultaneous_run_id="r", simultaneous_skip_layout=True,
-        simultaneous_layout_process_count=2)
+        no_report=True, benchmarkTime=1, simultaneous_run_id="r", simultaneous_skip_layout=True)
     assert len(result["outResults"]["write"]) == 1
 
 

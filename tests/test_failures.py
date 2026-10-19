@@ -39,7 +39,7 @@ def test_metadata_helpers_return_error_text_on_failure(iotest_mod, tmp_path):
 
 
 def test_failed_write_is_counted_not_timed(run_main, work_dir, rec_tl):
-    blocker = block_with_dir(work_dir / "0" / "temp_2.bin")
+    blocker = block_with_dir(work_dir / "0000" / "temp_2.bin")
     result = run_main(["write"], file_count=2, tl=rec_tl)
     times = result["outResults"]["write"]
     assert len(times) == 1
@@ -54,7 +54,7 @@ def test_failed_write_is_counted_not_timed(run_main, work_dir, rec_tl):
 
 
 def test_all_ops_failed_reports_first_error_without_crashing(run_main, work_dir, rec_tl):
-    blocker = block_with_dir(work_dir / "0" / "temp_1.bin")
+    blocker = block_with_dir(work_dir / "0000" / "temp_1.bin")
     result = run_main(["write"], tl=rec_tl)
     assert result["outResults"]["write"] == []
     assert len(result["failedOps"]["write"]) == 1
@@ -62,7 +62,7 @@ def test_all_ops_failed_reports_first_error_without_crashing(run_main, work_dir,
 
 
 def test_comprehensive_failures_stay_on_their_own_op(run_main, work_dir):
-    block_with_dir(work_dir / "0" / "temp_1.bin")
+    block_with_dir(work_dir / "0000" / "temp_1.bin")
     result = run_main(["comprehensive"])
     failed = {key: len(errors) for key, errors in result["failedOps"].items()}
     # the write fails on the blocker directory; rename and stat work on a directory,
@@ -72,7 +72,7 @@ def test_comprehensive_failures_stay_on_their_own_op(run_main, work_dir):
 
 
 def test_simultaneous_write_failure_is_counted(run_main, work_dir):
-    block_with_dir(work_dir / ".iotest_simul_t" / "worker_0" / "write_1.bin")
+    block_with_dir(work_dir / ".iotest_simul_t" / "worker_0000" / "write_1.bin")
     result = run_main(["simultaneous"], process_count=2, simultaneous_run_id="t")
     assert result["outResults"]["write"] == []
     assert len(result["failedOps"]["write"]) == 1
@@ -81,7 +81,7 @@ def test_simultaneous_write_failure_is_counted(run_main, work_dir):
 
 
 def test_failed_ops_keys_follow_repeated_mode_renames(run_main, work_dir):
-    block_with_dir(work_dir / "0" / "temp_1.bin")
+    block_with_dir(work_dir / "0000" / "temp_1.bin")
     result = run_main(["write", "write"])
     assert set(result["failedOps"]) == {"write_1", "write_2"}
     assert set(result["failedOps"]) == set(result["outResults"])
@@ -96,14 +96,14 @@ def test_failed_ops_keys_follow_repeated_mode_renames(run_main, work_dir):
 )
 def test_short_report_mentions_failures(run_main, work_dir, webhook, blocked, file_count, expected):
     url, received = webhook()
-    block_with_dir(work_dir / "0" / blocked)
+    block_with_dir(work_dir / "0000" / blocked)
     run_main(["write"], file_count=file_count, message_end_point_address=url)
     (request,) = received()
     assert expected in request["json"]["content"]
 
 
 def test_tuning_attempt_with_failures_exits(iotest_mod, work_dir, rec_tl, tiny):
-    block_with_dir(work_dir / "0" / "temp_1.bin")
+    block_with_dir(work_dir / "0000" / "temp_1.bin")
     options = iotest_mod.RunOptions(
         file_size=tiny["file_size"], file_count=1, process_count=1, directories=str(work_dir),
         modes=["write"], quiet=True, zeros=True, stealth=False, threshold_to_report_anomaly=0,
@@ -114,7 +114,7 @@ def test_tuning_attempt_with_failures_exits(iotest_mod, work_dir, rec_tl, tiny):
 
 
 def test_final_tuning_run_with_failures_exits(iotest_mod, work_dir, rec_tl, tiny):
-    block_with_dir(work_dir / "0" / "temp_1.bin")
+    block_with_dir(work_dir / "0000" / "temp_1.bin")
     # no_report=False is what makes the final run happen at all
     options = iotest_mod.RunOptions(
         file_size=tiny["file_size"], file_count=1, process_count=1, directories=str(work_dir),
@@ -128,7 +128,7 @@ def test_final_tuning_run_with_failures_exits(iotest_mod, work_dir, rec_tl, tiny
 def test_worker_that_dies_counts_its_ops_as_failed(run_main, work_dir, webhook):
     # a regular file where the worker wants its directory: os.makedirs raises and the
     # process dies before its loop, handing back no results at all
-    (work_dir / "0").write_text("")
+    (work_dir / "0000").write_text("")
     url, received = webhook()
     result = run_main(["write"], file_count=3, message_end_point_address=url)
     assert result["outResults"]["write"] == []
@@ -138,7 +138,7 @@ def test_worker_that_dies_counts_its_ops_as_failed(run_main, work_dir, webhook):
 
 
 def test_dead_comprehensive_worker_fails_every_step(run_main, work_dir):
-    (work_dir / "0").write_text("")
+    (work_dir / "0000").write_text("")
     result = run_main(["comprehensive"], file_count=2)
     assert {key: len(errors) for key, errors in result["failedOps"].items()} == {
         "write": 2, "move": 2, "stat": 2, "read": 2}

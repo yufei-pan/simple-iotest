@@ -34,7 +34,7 @@ def blocks(data, size=512):
 
 
 def worker_files(work_dir):
-    return [(work_dir / "0" / name).read_bytes() for name in ("temp_1.bin", "temp_2.bin")]
+    return [(work_dir / "0000" / name).read_bytes() for name in ("temp_1.bin", "temp_2.bin")]
 
 
 def test_verify_implies_unique_and_survives_replace(iotest_mod):
@@ -80,7 +80,7 @@ def test_simultaneous_writers_and_layout_write_and_check_the_trailer(run_main, i
     result = run_main(["simultaneous"], process_count=2, file_count=2, file_size=1024, verify=True,
         block_size=block_size, simultaneous_run_id="t", simultaneous_skip_cleanup=True)
     assert iotest_mod.total_failed_ops(result) == 0
-    files = list((work_dir / ".iotest_simul_t" / "worker_0").iterdir())
+    files = list((work_dir / ".iotest_simul_t" / "worker_0000").iterdir())
     assert sorted(p.name for p in files) == ["read_1.bin", "read_2.bin", "write_1.bin", "write_2.bin"]
     for path in files:
         data = path.read_bytes()
@@ -92,7 +92,7 @@ def test_simultaneous_writers_and_layout_write_and_check_the_trailer(run_main, i
 @pytest.mark.parametrize("position", [0, 1500, 2498])
 def test_a_flipped_byte_fails_a_later_verified_read(run_main, iotest_mod, work_dir, block_size, position):
     run_main(["write"], file_size=2500, verify=True, block_size=block_size)
-    path = work_dir / "0" / "temp_1.bin"
+    path = work_dir / "0000" / "temp_1.bin"
     data = flip(path, position)
     result = run_main(["read"], file_size=2500, verify=True, block_size=block_size)
     assert result["outResults"]["read"] == []
@@ -102,7 +102,7 @@ def test_a_flipped_byte_fails_a_later_verified_read(run_main, iotest_mod, work_d
 
 def test_files_written_without_verify_fail_it(run_main, work_dir):
     run_main(["write"], file_size=2500)
-    path = work_dir / "0" / "temp_1.bin"
+    path = work_dir / "0000" / "temp_1.bin"
     result = run_main(["read"], file_size=2500, verify=True)
     assert result["failedOps"]["read"] == [mismatch(path, path.read_bytes())]
 
@@ -177,7 +177,7 @@ def test_cli_verify_catches_a_flipped_byte(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     options = json.loads(out.read_text())["options"]
     assert options["verify"] is True and options["unique"] is True
-    path = work / "0" / "temp_1.bin"
+    path = work / "0000" / "temp_1.bin"
     data = flip(path, 100)
     proc = run_iotest(common + ["read"])
     assert proc.returncode == 1, proc.stdout + proc.stderr
@@ -195,7 +195,7 @@ def test_cli_verify_needs_a_file_size_of_at_least_28_bytes(tmp_path, size, code)
         # argparse's usage error, before anything runs
         assert "--verify" in proc.stderr and not work.exists()
     else:
-        data = (work / "0" / "temp_1.bin").read_bytes()
+        data = (work / "0000" / "temp_1.bin").read_bytes()
         assert len(data) == 28 and stored_crc(data) == computed_crc(data)
 
 

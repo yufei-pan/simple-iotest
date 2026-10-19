@@ -27,7 +27,7 @@ def test_ops_timeline_has_one_row_per_op_and_matches_main_csv(run_main, work_dir
         assert len(pass_rows) == 6
         assert {r["mode"] for r in pass_rows} == {op}
         assert {r["op"] for r in pass_rows} == {op}
-        assert {r["worker"] for r in pass_rows} == {"0", "1"}
+        assert {r["worker"] for r in pass_rows} == {"0000", "0001"}
         assert sorted({r["file_index"] for r in pass_rows}) == ["1", "2", "3"]
         assert all(float(r["start_s"]) >= 0 and r["error"] == "" for r in pass_rows)
     # rows are sorted by pass, then start
@@ -59,8 +59,8 @@ def test_ops_timeline_covers_comprehensive_simultaneous_and_meta(run_main, work_
 
 
 def test_ops_timeline_records_failed_op_with_error_and_no_duration(run_main, work_dir, rec_tl):
-    (work_dir / "0").mkdir()
-    (work_dir / "0" / "temp_2.bin").mkdir()
+    (work_dir / "0000").mkdir()
+    (work_dir / "0000" / "temp_2.bin").mkdir()
     run_main(["write"], file_count=2, tl=rec_tl, no_report=False, timeline=True)
     rows = read_ops(work_dir)
     assert len(rows) == 2

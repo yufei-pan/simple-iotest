@@ -173,9 +173,9 @@ def test_index_worker_holds_no_file_data(iotest_mod, work_dir):
 
 
 def test_simultaneous_reader_holds_only_its_read_buffer(iotest_mod, work_dir, rec_tl):
-    iotest_mod.run_simultaneous_layout(2, 4 * MiB, [str(work_dir)], "t", 1, 1, True, True, rec_tl)
+    iotest_mod.run_simultaneous_layout(2, 4 * MiB, [str(work_dir)], "t", 1, True, True, rec_tl)
     peak = traced_peak(iotest_mod.simultaneous_role_worker,
-        "read", 2, 4 * MiB, str(work_dir), "t", "0", [], True, False, 0)
+        "read", 2, 4 * MiB, str(work_dir), "t", iotest_mod.worker_counter_name(0), [], True, False, 0)
     assert peak < 1.5 * 4 * MiB
 
 
@@ -210,18 +210,35 @@ def test_read_worker_that_will_recreate_generates_before_the_start_barrier(iotes
     assert made_at[0] < start
 
 
-def test_memory_cut_that_changes_padding_recounts_recreated_files(run_main, iotest_mod, monkeypatch):
-    # a -pc 12 write leaves 00..11. The memory fits 9 read-only workers, but at -pc 9 the padding
-    # is 0..8, those files are missing, and each worker would also hold content to recreate them
+def test_memory_cut_keeps_the_files_of_the_first_workers(run_main, iotest_mod, monkeypatch):
+    # a -pc 12 write leaves 0000..0011. The memory fits 9 read-only workers: they are 0000..0008,
+    # whose files are all there, so none of them holds content to recreate files
     read_only = iotest_mod.memory_per_process(["read"], 1024, 1)
-    recreating = iotest_mod.memory_per_process(["read"], 1024, 1, read_recreates=True)
     available = int(9 * read_only) + 1
-    assert int(available // recreating) < 9
     run_main(["write"], process_count=12)
     monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
     monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (available, 0))
     result = run_main(["read"], process_count=12)
-    assert result["process_count"] == int(available // recreating)
+    assert result["process_count"] == 9
+
+
+def test_worker_names_do_not_depend_on_the_process_count(iotest_mod):
+    assert [iotest_mod.worker_counter_name(c) for c in (0, 9, 11, 9999, 12345)] == [
+        "0000", "0009", "0011", "9999", "12345"]
+    assert [name for _, name in iotest_mod.worker_dirs(["d"], 3)] == ["0000", "0001", "0002"]
+
+
+def test_a_read_at_a_smaller_process_count_finds_the_files_of_a_larger_write(run_main, work_dir, rec_tl):
+    # -t 12 then -t 9 used to look for 0..8 instead of the 00..11 the write left, and recreate every
+    # file inside the timed read pass
+    run_main(["write"], process_count=12, file_count=2)
+    written = {p: p.stat().st_mtime_ns for p in work_dir.rglob("temp_*.bin")}
+    assert sorted({p.parent.name for p in written}) == [f"{c:04d}" for c in range(12)]
+    result = run_main(["read"], process_count=9, file_count=2, tl=rec_tl)
+    assert len(result["outResults"]["read"]) == 18
+    assert {p: p.stat().st_mtime_ns for p in work_dir.rglob("temp_*.bin")} == written
+    # nothing to recreate, so no content to generate
+    assert any("Skipping file generation benchmark" in m for m in rec_tl.printed)
 
 
 def test_every_mode_has_its_per_op_figures(iotest_mod):

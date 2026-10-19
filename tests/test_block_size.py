@@ -30,7 +30,7 @@ def stamp_paths(iotest_mod):
 
 
 def worker_files(work_dir, count=2):
-    return [(work_dir / "0" / f"temp_{i}.bin").read_bytes() for i in range(1, count + 1)]
+    return [(work_dir / "0000" / f"temp_{i}.bin").read_bytes() for i in range(1, count + 1)]
 
 
 def worker_samples(iotest_mod, results):
@@ -56,7 +56,7 @@ def test_chunked_unique_files_keep_their_size_and_never_repeat_a_block(iotest_mo
         monkeypatch.setattr(iotest_mod, "numpy_available", use_numpy)
         d = tmp_path / str(use_numpy)
         d.mkdir()
-        iotest_mod.worker(2, 8192 + 100, str(d), [], "write", "0", True, zeros, 0, True, block_size=block_size)
+        iotest_mod.worker(2, 8192 + 100, str(d), [], "write", "0000", True, zeros, 0, True, block_size=block_size)
         files = worker_files(d)
         assert [len(data) for data in files] == [8292, 8292]
         assert all_unique(*files)
@@ -259,7 +259,7 @@ def test_every_mode_counts_whole_files_with_a_block_size(run_main, iotest_mod, m
 def test_chunked_simultaneous_writer_and_layout_files_share_no_block(run_main, work_dir):
     run_main(["simultaneous"], process_count=2, file_count=2, file_size=8192, zeros=True, unique=True,
         block_size=1000, simultaneous_run_id="t", simultaneous_skip_cleanup=True)
-    worker_dir = work_dir / ".iotest_simul_t" / "worker_0"
+    worker_dir = work_dir / ".iotest_simul_t" / "worker_0000"
     files = [(worker_dir / name).read_bytes() for name in ("write_1.bin", "write_2.bin", "read_1.bin", "read_2.bin")]
     assert [len(data) for data in files] == [8192] * 4
     assert all_unique(*files)

@@ -36,7 +36,7 @@ def test_meta_only_skips_generation_benchmark(run_main, rec_tl):
 
 
 def test_meta_ignores_leftover_files(run_main, work_dir):
-    meta = work_dir / "0" / "meta"
+    meta = work_dir / "0000" / "meta"
     meta.mkdir(parents=True)
     for i in (1, 2, 3):
         (meta / "meta_{}".format(i)).write_bytes(b"")
@@ -72,9 +72,9 @@ def test_meta_failed_stat_counts_in_run(run_main, iotest_mod, monkeypatch):
 
 
 def test_meta_cleanup_removes_leftover_meta_dirs(run_main, work_dir):
-    (work_dir / "0" / "meta").mkdir(parents=True)
+    (work_dir / "0000" / "meta").mkdir(parents=True)
     run_main(["meta"], file_count=2, cleanup=True)
-    assert not (work_dir / "0").exists()
+    assert not (work_dir / "0000").exists()
 
 
 def test_meta_reserves_no_memory(iotest_mod):
@@ -89,5 +89,5 @@ def test_meta_only_run_leaves_no_directories(run_main, work_dir):
 
 def test_meta_after_write_keeps_the_counter_dir_with_files(run_main, work_dir):
     run_main(["write", "meta"], file_count=2)
-    assert not (work_dir / "0" / "meta").exists()
-    assert (work_dir / "0" / "temp_1.bin").exists()
+    assert not (work_dir / "0000" / "meta").exists()
+    assert (work_dir / "0000" / "temp_1.bin").exists()

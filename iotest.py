@@ -853,8 +853,12 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		# one record per worker and pass, so the manager sees one append, not one per op
 		timeline.append(local_timeline.record())
 
-def worker_counter_name(counter, process_count):
-	return str(counter).zfill(len(str(process_count)))
+# worker directories are named by the counter at this width whatever the process count, so a run at another
+# count uses the same workers' files: a smaller count is the first workers of a larger one
+WORKER_NAME_DIGITS = 4
+
+def worker_counter_name(counter):
+	return str(counter).zfill(WORKER_NAME_DIGITS)
 
 def worker_file_path(directory, counter_name, index, file_count):
 	return os.path.join(directory, str(counter_name), f"temp_{str(index + 1).zfill(len(str(file_count)))}.bin")
@@ -862,7 +866,7 @@ def worker_file_path(directory, counter_name, index, file_count):
 def worker_dirs(directories, process_count):
 	# (directory, counter_name) of every plain worker
 	for counter in range(process_count):
-		yield directories[counter % len(directories)], worker_counter_name(counter, process_count)
+		yield directories[counter % len(directories)], worker_counter_name(counter)
 
 def worker_files(directories, process_count, file_count):
 	# (directory, counter_name, path) of every temp file the plain workers use
@@ -972,10 +976,14 @@ def check_free_space(needed_by_dir, tl, mountinfo_lines=None, cow_extra=None):
 		tl.teeerror("Nothing was written. Reduce -fs, -fc or -pc (or use -ts) and try again.")
 	return enough
 
-# process counts run_iotest() ran plain workers at in this process: -cl after tuning and the
-# leftover hint cover exactly the files this run wrote, not other runs' files that
-# happen to use the same names
-worker_runs = set()
+# the largest process count run_iotest() ran plain workers at in this process. Every run's workers are the
+# first that many, so -cl after tuning and the leftover hint cover the files this run used, and not those
+# of other runs' workers beyond them
+largest_worker_run = 0
+
+def note_worker_run(process_count):
+	global largest_worker_run
+	largest_worker_run = max(largest_worker_run, process_count)
 
 def remove_worker_files(entries):
 	# remove only these files, then their worker dirs if now empty
@@ -1005,20 +1013,17 @@ def cleanup_meta_dirs(directories, process_count):
 		except OSError:
 			pass
 
-def leftover_hint(directories, process_counts, file_count):
-	# runs at several process counts share counter names, and so files: count each worker's files once,
-	# going through them instead of holding every path
+def leftover_hint(directories, worker_count, file_count):
+	# the files of the first worker_count workers, going through them instead of holding every path
 	count = total = 0
-	for directory, counter_name in {pair for process_count in process_counts for pair in worker_dirs(directories, process_count)}:
-		for index in range(file_count):
-			path = worker_file_path(directory, counter_name, index, file_count)
-			try:
-				st = os.stat(path)
-			except OSError:
-				continue
-			if stat.S_ISREG(st.st_mode):
-				count += 1
-				total += st.st_size
+	for _, _, path in worker_files(directories, worker_count, file_count):
+		try:
+			st = os.stat(path)
+		except OSError:
+			continue
+		if stat.S_ISREG(st.st_mode):
+			count += 1
+			total += st.st_size
 	if not count:
 		return None
 	return (f"Left {count} test files ({format_bytes(total)}B) in {', '.join(directories)}; "
@@ -1080,18 +1085,15 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 		# one record per worker and pass, so the manager sees one append, not one per op
 		timeline.append(local_timeline.record())
 
-def cleanup_simultaneous_tree(directories, run_id, process_count):
-	seen = set()
-	for counter in range(process_count):
-		base = directories[counter % len(directories)]
+def cleanup_simultaneous_tree(directories, run_id):
+	# the run's tree in each directory that has one
+	for base in directories:
 		simul_root = os.path.join(base, f".iotest_simul_{run_id}")
-		if simul_root not in seen:
-			seen.add(simul_root)
-			if os.path.isdir(simul_root):
-				shutil.rmtree(simul_root, ignore_errors=True)
+		if os.path.isdir(simul_root):
+			shutil.rmtree(simul_root, ignore_errors=True)
 
 def run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
-		counter_padding_process_count, quiet, zeros, tl, unique=False, block_size=None, verify=False):
+		quiet, zeros, tl, unique=False, block_size=None, verify=False):
 	tl.teeprint(f"Simultaneous mode: layout pass writing read files ({layout_worker_count} workers)...")
 	layout_start = time.perf_counter()
 	layout_processes = []
@@ -1099,7 +1101,7 @@ def run_simultaneous_layout(file_count, file_size, directories, run_id, layout_w
 	layout_errors = layout_manager.list()
 	for counter in range(layout_worker_count):
 		assigned_directory = directories[counter % len(directories)]
-		counter_str = worker_counter_name(counter, counter_padding_process_count)
+		counter_str = worker_counter_name(counter)
 		p = Process(target=layout_read_worker, args=(file_count, file_size, assigned_directory, run_id, counter_str, quiet, zeros, unique, block_size, verify, layout_errors))
 		layout_processes.append(p)
 	start_processes(layout_processes)
@@ -1602,7 +1604,8 @@ def first_pass_start(start_at, process_start_delay, tl, start_notes, start_late)
 	return now + process_start_delay
 
 def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=None,stealth=False,message_end_point_address=None,no_report=False,threshold_to_report_anomaly = 0,benchmarkTime = 5,tuning_attempt=False,simultaneous_write_count=None,simultaneous_run_id=None,simultaneous_skip_layout=False,simultaneous_skip_cleanup=False,simultaneous_layout_workers=None,simultaneous_layout_process_count=None,unique=False,cleanup=False,json_path=None,start_at=None,block_size=None,verify=False,timeline=False):
-	# the original entry point, kept for callers that pass options one by one
+	# the original entry point, kept for callers that pass options one by one. simultaneous_layout_process_count
+	# is accepted and ignored: worker names no longer depend on the process count
 	options = RunOptions(file_size=file_size, file_count=file_count, process_count=process_count,
 		modes=modes, directories=directory, quiet=quiet, zeros=zeros, stealth=stealth,
 		message_end_point_address=message_end_point_address, no_report=no_report,
@@ -1612,12 +1615,11 @@ def main(file_size, file_count, process_count, directory,modes,quiet,zeros,tl=No
 	return run_iotest(options, tl=tl, tuning_attempt=tuning_attempt,
 		simultaneous_write_count=simultaneous_write_count, simultaneous_run_id=simultaneous_run_id,
 		simultaneous_skip_layout=simultaneous_skip_layout, simultaneous_skip_cleanup=simultaneous_skip_cleanup,
-		simultaneous_layout_workers=simultaneous_layout_workers,
-		simultaneous_layout_process_count=simultaneous_layout_process_count)
+		simultaneous_layout_workers=simultaneous_layout_workers)
 
 def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=None,
 		simultaneous_run_id=None, simultaneous_skip_layout=False, simultaneous_skip_cleanup=False,
-		simultaneous_layout_workers=None, simultaneous_layout_process_count=None):
+		simultaneous_layout_workers=None):
 	# read before the tuning override below: attempts must keep the digits off the JSON's stdout too
 	json_to_stdout = options.json_path == '-'
 	if tuning_attempt:
@@ -1681,12 +1683,6 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		tl.teeerror(f"Swap available memory: {format_bytes(swapMemory)}B")
 		tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
 		process_count = max(int((phyFreeMemory + swapMemory) // memoryPerProcess), 1)
-		# a smaller count can change the counter padding (00..11 -> 0..8): the files read
-		# expects may now be missing, and recreating them needs a second buffer per worker
-		if not read_recreates and read_recreates_files(modes, directories, process_count, file_count, file_size):
-			read_recreates = True
-			memoryPerProcess = memory_per_process(modes, buffer_size, file_count, read_recreates, options.timeline)
-			process_count = max(int((phyFreeMemory + swapMemory) // memoryPerProcess), 1)
 		tl.teeerror(f"Reducing the number of processes to {process_count}")
 	if 'simultaneous' in modes and simultaneous_write_count is not None and simultaneous_write_count > process_count - 1 >= 1:
 		# the memory check may have cut process_count below the requested split
@@ -1702,7 +1698,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	# recorded before any worker writes, so -cl after tuning also covers an attempt that
 	# never finished (Ctrl+C, a failing report write, ...)
 	if any(mode in ('write', 'read', 'random', 'comprehensive', 'index') for mode in modes):
-		worker_runs.add(process_count)
+		note_worker_run(process_count)
 	if phyFreeMemory > 0 and estimatedTotalMemory > phyFreeMemory * 0.9:
 		tl.teeerror("Estimated total memory usage is more than 90% of the total non swap available memory.")
 		tl.teeerror("You may want to reduce the file size or the number of processes.")
@@ -1799,12 +1795,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				if write_count < 1 or read_count < 1:
 					raise ValueError("simultaneous mode requires at least 1 writer and 1 reader")
 				run_id = simultaneous_run_id or tl.currentDateTime
-				layout_padding_pc = simultaneous_layout_process_count or process_count
 				layout_worker_count = simultaneous_layout_workers if simultaneous_layout_workers is not None else process_count
 				try:
 					if not simultaneous_skip_layout:
 						layout_errors = run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
-							layout_padding_pc, quiet, zeros, tl, unique, block_size, verify)
+							quiet, zeros, tl, unique, block_size, verify)
 						if layout_errors:
 							# the finally below still cleans the tree up
 							continue
@@ -1823,16 +1818,15 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					tl.teeprint(f"Simultaneous mode: {write_count} writers + {read_count} readers...")
 					for counter in range(write_count):
 						assigned_directory = directories[counter % len(directories)]
-						# the layout's padding, not this run's: tuning attempts at smaller counts then
-						# overwrite the same writer files instead of adding a second set
-						counter_str = worker_counter_name(counter, layout_padding_pc)
+						# tuning attempts at smaller counts overwrite the same writer files
+						counter_str = worker_counter_name(counter)
 						p = Process(target=simultaneous_role_worker, args=('write', file_count, file_size, assigned_directory, run_id, counter_str, write_results, quiet, zeros, thread_start_time, unique, write_late, pass_timeline, block_size, verify))
 						write_processes.append(p)
 					for counter in range(read_count):
 						assigned_directory = directories[counter % len(directories)]
-						# readers read the layout pass's files, so they use its padding (the tuner
-						# lays out for its largest process count and then runs smaller attempts)
-						counter_str = worker_counter_name(counter, layout_padding_pc)
+						# the layout pass's files: the tuner lays out for its largest process count
+						# and then runs smaller attempts
+						counter_str = worker_counter_name(counter)
 						p = Process(target=simultaneous_role_worker, args=('read', file_count, file_size, assigned_directory, run_id, counter_str, read_results, quiet, zeros, thread_start_time, unique, read_late, pass_timeline, block_size, verify))
 						read_processes.append(p)
 					totalStartTime = thread_start_time
@@ -1858,7 +1852,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					warn_late_starts(tl, 'simultaneous', write_late + read_late, process_count)
 				finally:
 					if not simultaneous_skip_cleanup:
-						cleanup_simultaneous_tree(directories, run_id, layout_padding_pc)
+						cleanup_simultaneous_tree(directories, run_id)
 						tl.teeprint("Simultaneous mode: cleaned up temporary files.")
 				continue
 			processes = []
@@ -1872,7 +1866,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				thread_start_time = time.perf_counter() + processStartDelay
 			for counter in range(process_count):
 				assigned_directory = directories[counter % len(directories)]
-				counter = worker_counter_name(counter, process_count)
+				counter = worker_counter_name(counter)
 				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, read_recreates, late, json_to_stdout, pass_timeline, block_size, verify))
 				processes.append(p)
 			totalStartTime = thread_start_time
@@ -2037,12 +2031,11 @@ def parse_modes(mode_args):
 			modes.extend(MODE_ALIASES[key])
 	return modes
 
-def _simultaneous_session_kwargs(run_id, max_pc, skip_layout=True, skip_cleanup=True):
+def _simultaneous_session_kwargs(run_id, skip_layout=True, skip_cleanup=True):
 	return {
 		'simultaneous_run_id': run_id,
 		'simultaneous_skip_layout': skip_layout,
 		'simultaneous_skip_cleanup': skip_cleanup,
-		'simultaneous_layout_process_count': max_pc,
 	}
 
 def _run_tuning_main(options, tl, process_count, simultaneous_write_count=None, simultaneous_session=None):
@@ -2164,7 +2157,7 @@ def tune_simultaneous(options, tl, write_target, read_target):
 		os.makedirs(output_dir, exist_ok=True)
 	run_id = tl.currentDateTime
 	layout_workers = max(max_pc - 1, 1)
-	sim_session = _simultaneous_session_kwargs(run_id, max_pc)
+	sim_session = _simultaneous_session_kwargs(run_id)
 	if write_target and read_target:
 		write_count, read_count = estimate_simultaneous_split(pc, write_target, read_target)
 		split_note = (f"estimated {write_count} writers + {read_count} readers from target ratio "
@@ -2218,7 +2211,7 @@ def tune_simultaneous(options, tl, write_target, read_target):
 	if not check_free_space(needed, tl):
 		sys.exit(1)
 	try:
-		layout_failures = run_simultaneous_layout(options.file_count, options.file_size, directories, run_id, layout_workers, max_pc,
+		layout_failures = run_simultaneous_layout(options.file_count, options.file_size, directories, run_id, layout_workers,
 			options.quiet, options.zeros, tl, options.unique, effective_block_size(options.block_size, options.file_size),
 			options.verify)
 		if layout_failures:
@@ -2366,10 +2359,11 @@ def tune_simultaneous(options, tl, write_target, read_target):
 		tl.teeerror("Simultaneous throughput tuning exceeded maximum attempts.")
 		sys.exit(1)
 	finally:
-		cleanup_simultaneous_tree(directories, run_id, max_pc)
+		cleanup_simultaneous_tree(directories, run_id)
 		tl.teeprint("Simultaneous mode: cleaned up temporary files.")
 
 def tune_for_targets(options, tl, write_target, read_target):
+	global largest_worker_run
 	if 'simultaneous' not in options.modes:
 		# once up front: attempts check space quietly; tune_simultaneous checks its own layout
 		for output_dir in options.directories:
@@ -2380,13 +2374,12 @@ def tune_for_targets(options, tl, write_target, read_target):
 			sys.exit(1)
 	# clean up once at the end, not in each run: deleting files between attempts would
 	# make the next read attempt recreate them inside its timed pass
-	worker_runs.clear()
+	largest_worker_run = 0
 	try:
 		_tune_for_targets(options.replace(cleanup=False), tl, write_target, read_target)
 	finally:
 		if options.cleanup:
-			for run_process_count in worker_runs:
-				cleanup_worker_files(options.directories, run_process_count, options.file_count)
+			cleanup_worker_files(options.directories, largest_worker_run, options.file_count)
 
 def _tune_for_targets(options, tl, write_target, read_target):
 	modes = options.modes
@@ -2576,7 +2569,7 @@ def climain():
 	else:
 		result = run_iotest(options, tl=tl)
 	if not options.cleanup and ('write' in modes or 'random' in modes or 'read' in modes):
-		hint = leftover_hint(options.directories, sorted(worker_runs), options.file_count)
+		hint = leftover_hint(options.directories, largest_worker_run, options.file_count)
 		if hint:
 			tl.teeprint(hint)
 	if result is not None and (total_failed_ops(result) or result['report_errors']):

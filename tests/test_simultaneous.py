@@ -62,24 +62,25 @@ def test_simultaneous_requires_pc_ge_2(run_main):
         run_main(["simultaneous"], process_count=1)
 
 
-def test_tuning_attempt_readers_find_the_padded_layout(iotest_mod, work_dir, rec_tl):
-    # the tuner lays out read files for its largest process count (12 -> worker_00..worker_10)
-    # and then runs attempts at smaller counts; readers at pc=9 must still use worker_00..,
-    # not worker_0.., or they recreate every read file inside the timed read pass
-    iotest_mod.run_simultaneous_layout(1, 1024, [str(work_dir)], "r", 11, 12, True, True, rec_tl)
+def test_tuning_attempt_readers_find_the_layout_of_a_larger_count(iotest_mod, work_dir, rec_tl):
+    # the tuner lays out read files for its largest process count (12 -> 11 layout workers) and then
+    # runs attempts at smaller counts; readers at pc=9 must find those files, or they recreate every
+    # read file inside the timed read pass
+    iotest_mod.run_simultaneous_layout(1, 1024, [str(work_dir)], "r", 11, True, True, rec_tl)
+    simul = Path(work_dir) / ".iotest_simul_r"
+    laid_out = {p: p.stat().st_mtime_ns for p in simul.rglob("read_*.bin")}
     iotest_mod.main(1024, 1, 9, str(work_dir), ["simultaneous"], True, True, tl=rec_tl, no_report=True,
         benchmarkTime=1, simultaneous_run_id="r", simultaneous_skip_layout=True,
-        simultaneous_skip_cleanup=True, simultaneous_layout_process_count=12, simultaneous_write_count=4)
-    simul = Path(work_dir) / ".iotest_simul_r"
-    # writers use the layout's padding too, so every attempt overwrites the same files
-    # instead of leaving a second set in worker_0.. when the count drops below 10
-    assert list(simul.glob("worker_?")) == []
+        simultaneous_skip_cleanup=True, simultaneous_write_count=4)
+    assert {p: p.stat().st_mtime_ns for p in simul.rglob("read_*.bin")} == laid_out
+    # writers are the first workers too, so every attempt overwrites the same files
+    assert sorted(p.name for p in simul.iterdir()) == [f"worker_{c:04d}" for c in range(11)]
 
 
 def test_layout_write_failure_skips_the_timed_pass_and_is_reported(iotest_mod, run_main, work_dir, rec_tl):
     # a directory where a read file belongs makes that layout write fail
     for counter in range(2):
-        blocker = Path(iotest_mod.simultaneous_worker_dir(str(work_dir), "lf", iotest_mod.worker_counter_name(counter, 2))) / "read_1.bin"
+        blocker = Path(iotest_mod.simultaneous_worker_dir(str(work_dir), "lf", iotest_mod.worker_counter_name(counter))) / "read_1.bin"
         blocker.mkdir(parents=True)
     result = run_main(["simultaneous"], process_count=2, tl=rec_tl, simultaneous_run_id="lf")
     assert len(result["layout_errors"]) == 2

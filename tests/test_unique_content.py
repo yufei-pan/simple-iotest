@@ -13,7 +13,7 @@ def blocks(data, size=512):
 
 
 def worker_files(work_dir):
-    return [(work_dir / "0" / name).read_bytes() for name in ("temp_1.bin", "temp_2.bin")]
+    return [(work_dir / "0000" / name).read_bytes() for name in ("temp_1.bin", "temp_2.bin")]
 
 
 def test_files_in_a_worker_are_identical_by_default(run_main, work_dir):
@@ -34,7 +34,7 @@ def test_unique_files_share_no_block(run_main, work_dir):
 def test_unique_simultaneous_writer_and_layout_files_share_no_block(run_main, work_dir):
     run_main(["simultaneous"], process_count=2, file_count=2, file_size=8192, zeros=False, unique=True,
         simultaneous_run_id="t", simultaneous_skip_cleanup=True)
-    worker_dir = work_dir / ".iotest_simul_t" / "worker_0"
+    worker_dir = work_dir / ".iotest_simul_t" / "worker_0000"
     for a, b in (("write_1.bin", "write_2.bin"), ("read_1.bin", "read_2.bin")):
         assert blocks((worker_dir / a).read_bytes()).isdisjoint(blocks((worker_dir / b).read_bytes()))
 

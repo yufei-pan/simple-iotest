@@ -78,7 +78,7 @@ def test_cli_write_then_read(tmp_path):
 
 def test_cli_exits_nonzero_when_ops_fail(tmp_path):
     work = tmp_path / "w"
-    blocker = work / "0" / "temp_1.bin"
+    blocker = work / "0000" / "temp_1.bin"
     blocker.mkdir(parents=True)
     proc = run_iotest(
         ["-fs", "1k", "-fc", "1", "-pc", "1", "-d", str(work), "-nl", "-nr", "-z", "-bt", "1", "write"]

@@ -45,7 +45,7 @@ def test_json_summary_for_write_and_read(run_main, rec_tl, iotest_mod, tmp_path,
 
 
 def test_json_is_written_with_no_report_and_names_failures(run_main, rec_tl, tmp_path, work_dir):
-    (work_dir / "0" / "temp_1.bin").mkdir(parents=True)
+    (work_dir / "0000" / "temp_1.bin").mkdir(parents=True)
     path = tmp_path / "out.json"
     run_main(["write"], tl=rec_tl, no_report=True, json_path=str(path))
     data = json.loads(path.read_text())
