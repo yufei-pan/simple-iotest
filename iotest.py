@@ -1097,13 +1097,18 @@ def layout_read_worker(file_count, file_size, base_directory, run_id, counter, q
 	content = FileContent(file_size, zeros, unique, new_stamp_id(), block_size, verify)
 	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
 	os.makedirs(worker_dir, exist_ok=True)
+	failures = []
 	for i in range(file_count):
 		i_str = str(i + 1).zfill(len(str(file_count)))
 		file_name = os.path.join(worker_dir, f"read_{i_str}.bin")
 		op_result = content.write(file_name, i, quiet=quiet)
 		# a read file that was not laid out would be recreated inside the timed pass, so report it
-		if errors is not None and op_result[0] is None:
-			errors.append(str(op_result[1]))
+		if op_result[0] is None:
+			failures.append(str(op_result[1]))
+	# handed over once, after the last file, like the plain workers' results: the parent counts every file of a
+	# worker that dies before this as failed, so none is counted twice
+	if errors is not None and failures:
+		errors.extend(failures)
 
 def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id, counter, results, quiet, zeros, thread_start_time, unique=False, late_starts=None, timeline=None, block_size=None, verify=False):
 	local_results = []
@@ -1155,12 +1160,17 @@ def cleanup_simultaneous_tree(directories, run_id):
 			shutil.rmtree(simul_root, ignore_errors=True)
 
 def run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
-		quiet, zeros, tl, unique=False, block_size=None, verify=False):
+		quiet, zeros, tl, unique=False, block_size=None, verify=False, manager=None):
+	# returns an error text per read file the layout could not write. The workers hand them over in a list held
+	# by manager: run_iotest()'s, or for the tuner, which lays out outside run_iotest(), one made here
+	if manager is None:
+		with Manager() as manager:
+			return run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
+				quiet, zeros, tl, unique, block_size, verify, manager)
 	tl.teeprint(f"Simultaneous mode: layout pass writing read files ({layout_worker_count} workers)...")
 	layout_start = time.perf_counter()
 	layout_processes = []
-	layout_manager = Manager()
-	layout_errors = layout_manager.list()
+	layout_errors = manager.list()
 	for counter in range(layout_worker_count):
 		assigned_directory = directories[counter % len(directories)]
 		counter_str = worker_counter_name(counter)
@@ -1169,9 +1179,9 @@ def run_simultaneous_layout(file_count, file_size, directories, run_id, layout_w
 	start_processes(layout_processes)
 	for p in layout_processes:
 		p.join()
-	# one bulk fetch: iterating a proxy costs a round trip per item
-	failures = layout_errors[:]
-	layout_manager.shutdown()
+	# one bulk fetch: iterating a proxy costs a round trip per item. A worker that died (a MemoryError making
+	# its content, a directory it cannot create, ...) reported nothing, so all its files count as failed
+	failures = layout_errors[:] + dead_worker_errors(layout_processes, file_count)
 	if failures:
 		tl.teeerror(f"Layout pass could not write {len(failures)} read files, first error: {failures[0]}")
 	tl.teeprint(f"Layout pass complete in {time.perf_counter() - layout_start:.4f} s")
@@ -1275,8 +1285,8 @@ def dead_worker_errors(processes, file_count):
 	return errors
 
 def total_failed_ops(result):
-	# layout write failures count like failed ops: they make the run exit 1
-	return sum(len(errors) for errors in result.get('failedOps', {}).values()) + len(result.get('layout_errors', ()))
+	# layout write failures are failed ops too, under their layout key
+	return sum(len(errors) for errors in result.get('failedOps', {}).values())
 
 def benchmarkGenSpeed(file_size, file_count,zeros,results,timeout=5):
 	start_time = time.perf_counter()
@@ -1648,19 +1658,23 @@ def summarize_key(times, failed, effective_pc, total_time, file_size, has_bytes)
 			stats['io_time_pct'] = total_p_time / total_time * 100
 	return stats
 
-def format_key_report(mode, stats, late, estimated, zeros, dedup_notes):
+def format_key_report(mode, stats, late, estimated, zeros, dedup_notes, planned_ops=None):
+	# planned_ops: the read files of a failed simultaneous layout pass, whose writes are not timed
 	report = ["*"*80, f"Report for {mode} mode:"]
 	if zeros:
 		report.append("Warning! Using zeros for file content. Compressed filesystems will show optimistic results.")
 	report.extend(dedup_notes)
-	op_count = stats['ops'] + stats['failed']
+	op_count = stats['ops'] + stats['failed'] if planned_ops is None else planned_ops
 	if stats['failed']:
 		report.append(f"Failed {mode} ops:      \t{stats['failed']} of {op_count}, first error: {stats['first_error']}")
 	if late[0]:
 		report.append(f"Late starts:           \t{late[0]} of {stats['process_count']} workers, up to {late[1]:.4f} s late (sync figures include the delay)")
 	latency = stats['latency_s']
 	if latency is None:
-		report.append(f"No successful {mode} ops, skipping timing statistics.")
+		if planned_ops is None:
+			report.append(f"No successful {mode} ops, skipping timing statistics.")
+		else:
+			report.append("Layout writes are not timed, and the timed simultaneous pass did not run.")
 		report.append("-"*80)
 		return report
 	if stats['total_bytes'] is not None:
@@ -1798,7 +1812,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	processes = []
 	outResults = dict()
 	failedOps = {}
-	layout_errors = []
+	# the read files each failed layout pass was to write, under its key in outResults
+	layout_files = {}
 	late_starts = {}
 	start_notes = []
 	start_late = []
@@ -1947,9 +1962,16 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				layout_worker_count = simultaneous_layout_workers if simultaneous_layout_workers is not None else process_count
 				try:
 					if not simultaneous_skip_layout:
-						layout_errors = run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
-							quiet, zeros, tl, unique, block_size, verify)
-						if layout_errors:
+						layout_failures = run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
+							quiet, zeros, tl, unique, block_size, verify, manager)
+						if layout_failures:
+							# a key of their own, kept in lockstep like the others (layout_1, layout_2, ... when
+							# several passes fail), so the report, the JSON and the report files show them and the
+							# run exits 1. The layout's writes are not timed: it has failures and no times
+							add_op_results(outResults, failedOps, 'layout', layout_failures)
+							addToDicWithoutOverwrite(layout_files, 'layout', file_count * layout_worker_count)
+							addToDicWithoutOverwrite(mode_process_counts, 'layout', layout_worker_count)
+							record_pass_meta(late_starts, sync_estimated, 'layout', (), False)
 							# the finally below still cleans the tree up
 							continue
 					write_results = manager.list()
@@ -2085,12 +2107,14 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		stats = summarize_key(outResults[mode], failedOps.get(mode, []), mode_process_counts.get(mode, process_count), totalTime.get(mode), file_size, 'write' in mode or 'read' in mode)
 		key_stats[mode] = stats
 		failed = failedOps.get(mode, [])
-		op_count = stats['ops'] + stats['failed']
+		planned_ops = layout_files.get(mode)
+		op_count = stats['ops'] + stats['failed'] if planned_ops is None else planned_ops
 		failed_note = f", {stats['failed']} of {op_count} ops failed" if failed else ''
-		report.extend(format_key_report(mode, stats, late_starts.get(mode, (0, 0.0)), sync_estimated.get(mode), zeros, dedup_notes))
+		report.extend(format_key_report(mode, stats, late_starts.get(mode, (0, 0.0)), sync_estimated.get(mode), zeros, dedup_notes, planned_ops))
 		if not outResults[mode]:
 			if options.message_end_point_address and failed:
-				short_reports.append(f"Short Report for {mode} mode: all {op_count} ops failed, first error: {failed[0]}")
+				failed_text = f"all {op_count}" if stats['failed'] == op_count else f"{stats['failed']} of {op_count}"
+				short_reports.append(f"Short Report for {mode} mode: {failed_text} ops failed, first error: {failed[0]}")
 			continue
 		latency = stats['latency_s']
 		if threshold_to_report_anomaly and threshold_to_report_anomaly > 0 and latency['p99'] > (latency['p1'] * threshold_to_report_anomaly):
@@ -2146,7 +2170,6 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		'late_starts': late_starts,
 		'sync_estimated': sync_estimated,
 		'report_errors': report_errors,
-		'layout_errors': layout_errors,
 	}
 
 MODE_ALIASES = {
