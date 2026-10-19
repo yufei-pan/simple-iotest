@@ -1,5 +1,7 @@
 import os
+import re
 import tracemalloc
+import types
 
 import pytest
 
@@ -285,3 +287,49 @@ def test_simultaneous_reader_allocates_its_buffer_before_the_start_barrier(iotes
         results, True, True, start)
     assert len(made_at) == 1 and made_at[0] < start
     assert not [s for s in iotest_mod.result_samples(results) if isinstance(s, str)]
+
+
+QUIET_MODES = ["write", "read", "random", "comprehensive", "index", "meta_create"]
+
+
+@pytest.mark.parametrize("mode", QUIET_MODES)
+def test_quiet_workers_build_no_per_op_log_line(iotest_mod, work_dir, monkeypatch, mode):
+    # with -q (the default) a log line per op costs about as much as a fast metadata op, inside the timed pass
+    if mode == "read":
+        iotest_mod.worker(3, 1024, str(work_dir), [], "write", "0000", True, True, 0)
+    monkeypatch.setattr(iotest_mod, "format_op", lambda *a: pytest.fail("a log line was built"))
+    results = []
+    iotest_mod.worker(3, 1024, str(work_dir), results, mode, "0000", True, True, 0)
+    assert not [s for s in iotest_mod.result_samples(results) if isinstance(s, str)]
+
+
+@pytest.mark.parametrize("role", ["write", "read"])
+def test_quiet_simultaneous_workers_build_no_per_op_log_line(iotest_mod, work_dir, monkeypatch, role):
+    iotest_mod.layout_read_worker(3, 1024, str(work_dir), "t", "0000", True, True)
+    monkeypatch.setattr(iotest_mod, "format_op", lambda *a: pytest.fail("a log line was built"))
+    results = []
+    iotest_mod.simultaneous_role_worker(role, 3, 1024, str(work_dir), "t", "0000", results, True, True, 0)
+    assert not [s for s in iotest_mod.result_samples(results) if isinstance(s, str)]
+
+
+@pytest.mark.parametrize("mode,writes", [("meta_create", False), ("index", False), ("write", True), ("read", True)])
+def test_only_passes_that_may_write_make_a_write_call_per_file(iotest_mod, work_dir, monkeypatch, mode, writes):
+    made = []
+    real_partial = iotest_mod.functools.partial
+
+    def partial(func, *args, **kwargs):
+        if getattr(func, "__func__", None) is iotest_mod.FileContent.write:
+            made.append(kwargs["index"])
+        return real_partial(func, *args, **kwargs)
+
+    monkeypatch.setattr(iotest_mod, "functools", types.SimpleNamespace(partial=partial))
+    iotest_mod.worker(3, 1024, str(work_dir), [], mode, "0000", True, True, 0)
+    assert made == ([0, 1, 2] if writes else [])
+
+
+def test_verbose_workers_log_each_op_as_before(iotest_mod, work_dir, capsys):
+    iotest_mod.worker(12, 1024, str(work_dir), [], "meta_create", "0000", False, True, 0)
+    lines = [line for line in capsys.readouterr().out.splitlines() if "\tCreate\t" in line]
+    assert len(lines) == 12
+    path = iotest_mod.meta_file_path(str(work_dir), "0000", 0, 12)
+    assert re.search(r"\[Process %d\]\tFile 01/12:\t%s\tCreate\t\S+ s" % (os.getpid(), re.escape(path)), lines[0])

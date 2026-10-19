@@ -804,6 +804,16 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 			late_starts.append(time.perf_counter() - thread_start_time)
 	log(f'Worker {counter} primed, waiting for {thread_start_time-time.perf_counter():.4f} seconds.')
 	# wait until thread_start_time
+	# with -q (the default) the loop builds no per-op log line: that costs about as much as a fast metadata op,
+	# inside the timed pass. Without it, log_op() prints the same line as always
+	verbose = not quiet
+	width = len(str(file_count))
+	pid = os.getpid()
+
+	def log_op(file_index, file_name, text):
+		log(f"[Process {pid}]\tFile {str(file_index).zfill(width)}/{file_count}:\t{file_name}\t{text}")
+	# a write, or a read that may recreate its file, writes the file's content; index and meta passes never do
+	writes = mode in ('write', 'read', 'random', 'comprehensive')
 	wait_for_barrier(thread_start_time)
 	if not is_meta:
 		os.makedirs(os.path.join(directory,str(counter)), exist_ok=True)
@@ -814,9 +824,8 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				# stderr when stdout carries the JSON summary
 				print(f'\r{i//reportInterval}',end='',flush=True,file=sys.stderr if progress_to_stderr else None)
 		file_name = meta_file_path(directory, counter, i, file_count) if is_meta else worker_file_path(directory, counter, i, file_count)
-		write_file = functools.partial(content.write, index=i, quiet=quiet)
+		write_file = functools.partial(content.write, index=i, quiet=quiet) if writes else None
 		file_index = i + 1
-		i = str(file_index).zfill(len(str(file_count)))
 		attempt = time.perf_counter() if local_timeline is not None else None
 		if mode == 'write':
 			op_result = write_file(file_name)
@@ -824,14 +833,16 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				local_timeline.add('write', file_index, attempt, op_result)
 			write_time = op_time(op_result)
 			local_results.append(write_time)
-			log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\t{format_op(write_time)}")
+			if verbose:
+				log_op(file_index, file_name, f"Wrote\t{format_op(write_time)}")
 		elif mode == 'read':
 			op_result = read_file(file_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
 			if local_timeline is not None:
 				local_timeline.add('read', file_index, attempt, op_result)
 			read_time = op_time(op_result)
 			local_results.append(read_time)
-			log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\t{format_op(read_time)}")
+			if verbose:
+				log_op(file_index, file_name, f"Read\t{format_op(read_time)}")
 		elif mode == 'random':
 			# here we start a random read or write
 			if bool(random.getrandbits(1)):
@@ -841,7 +852,8 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				write_time = op_time(op_result)
 				local_results.append(write_time)
 				local_kinds.append(OP_CODES['write'])
-				log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tWrote\t{format_op(write_time)}")
+				if verbose:
+					log_op(file_index, file_name, f"Wrote\t{format_op(write_time)}")
 			else:
 				op_result = read_file(file_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
 				if local_timeline is not None:
@@ -849,7 +861,8 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				read_time = op_time(op_result)
 				local_results.append(read_time)
 				local_kinds.append(OP_CODES['read'])
-				log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tRead\t{format_op(read_time)}")
+				if verbose:
+					log_op(file_index, file_name, f"Read\t{format_op(read_time)}")
 		elif mode == 'comprehensive':
 			resultList = []
 			moved_name = file_name + ".moved"
@@ -879,7 +892,8 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				os.remove(moved_name)
 			except OSError:
 				pass
-			log(f'[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tW: {format_op(resultList[0], ".4f")} M: {format_op(resultList[1], ".4f")} S: {format_op(resultList[2], ".4f")} R: {format_op(resultList[3], ".4f")}')
+			if verbose:
+				log_op(file_index, file_name, f'W: {format_op(resultList[0], ".4f")} M: {format_op(resultList[1], ".4f")} S: {format_op(resultList[2], ".4f")} R: {format_op(resultList[3], ".4f")}')
 			local_results.extend(resultList)
 		elif mode == 'index':
 			# This will test the indexing performance of the filesystem
@@ -888,7 +902,8 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				local_timeline.add('index', file_index, attempt, op_result)
 			index_time = op_time(op_result)
 			local_results.append(index_time)
-			log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\tIndexed\t{format_op(index_time)}")
+			if verbose:
+				log_op(file_index, file_name, f"Indexed\t{format_op(index_time)}")
 		elif is_meta:
 			phase = mode[len('meta_'):]
 			op_result = meta_file(phase, file_name, quiet)
@@ -896,7 +911,8 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				local_timeline.add(phase, file_index, attempt, op_result)
 			meta_time = op_time(op_result)
 			local_results.append(meta_time)
-			log(f"[Process {os.getpid()}]\tFile {i}/{file_count}:\t{file_name}\t{phase.capitalize()}\t{format_op(meta_time)}")
+			if verbose:
+				log_op(file_index, file_name, f"{phase.capitalize()}\t{format_op(meta_time)}")
 	if mode == 'meta_unlink':
 		remove_meta_dir(meta_dir)
 	log(f'Worker {counter} finished.')
@@ -1133,6 +1149,7 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
 	os.makedirs(worker_dir, exist_ok=True)
 	file_prefix = 'write_' if role == 'write' else 'read_'
+	# with -q no per-op log line is built, as in worker()
 	for i in range(file_count):
 		i_str = str(i + 1).zfill(len(str(file_count)))
 		file_name = os.path.join(worker_dir, f"{file_prefix}{i_str}.bin")
@@ -1144,14 +1161,16 @@ def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id
 				local_timeline.add('write', i + 1, attempt, op_result)
 			op = op_time(op_result)
 			local_results.append(op)
-			log(f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tWrote\t{format_op(op)}")
+			if not quiet:
+				log(f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tWrote\t{format_op(op)}")
 		else:
 			op_result = read_file(file_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
 			if local_timeline is not None:
 				local_timeline.add('read', i + 1, attempt, op_result)
 			op = op_time(op_result)
 			local_results.append(op)
-			log(f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tRead\t{format_op(op)}")
+			if not quiet:
+				log(f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tRead\t{format_op(op)}")
 	log(f'Worker {counter} ({role}) finished.')
 	results.append(results_record(local_results))
 	if local_timeline is not None:
