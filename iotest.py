@@ -803,7 +803,6 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		if late_starts is not None:
 			late_starts.append(time.perf_counter() - thread_start_time)
 	log(f'Worker {counter} primed, waiting for {thread_start_time-time.perf_counter():.4f} seconds.')
-	# wait until thread_start_time
 	# with -q (the default) the loop builds no per-op log line: that costs about as much as a fast metadata op,
 	# inside the timed pass. Without it, log_op() prints the same line as always
 	verbose = not quiet
@@ -814,6 +813,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		log(f"[Process {pid}]\tFile {str(file_index).zfill(width)}/{file_count}:\t{file_name}\t{text}")
 	# a write, or a read that may recreate its file, writes the file's content; index and meta passes never do
 	writes = mode in ('write', 'read', 'random', 'comprehensive')
+	# wait until thread_start_time
 	wait_for_barrier(thread_start_time)
 	if not is_meta:
 		os.makedirs(os.path.join(directory,str(counter)), exist_ok=True)
