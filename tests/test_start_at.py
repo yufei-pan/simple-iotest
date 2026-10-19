@@ -116,3 +116,24 @@ def test_barrier_wait_sleeps_once_until_a_second_before(monkeypatch):
     iotest.wait_for_barrier(time.perf_counter() + 3)
     assert 1.9 < sleeps[0] <= 2.0
     assert len(sleeps) > 1 and all(s == 0.001 for s in sleeps[1:])
+
+
+def test_start_late_is_null_when_no_pass_ran_at_start_at(iotest_mod, run_main, rec_tl, work_dir, tmp_path):
+    # the simultaneous layout fails, so its timed pass, the one --start_at was for, never starts: not "on time"
+    blocker = Path(iotest_mod.simultaneous_worker_dir(str(work_dir), "lf", iotest_mod.worker_counter_name(0))) / "read_1.bin"
+    blocker.mkdir(parents=True)
+    path = tmp_path / "out.json"
+    result = run_main(["simultaneous"], process_count=2, tl=rec_tl, start_at=time.time() + 60, json_path=str(path),
+        simultaneous_run_id="lf")
+    assert iotest_mod.total_failed_ops(result) == 1
+    data = json.loads(path.read_text())
+    assert data["options"]["start_at"] is not None
+    assert data["start_late_s"] is None
+    assert "Synchronized start" not in "\n".join(rec_tl.printed)
+    assert not any(m.startswith("Waiting until ") for m in rec_tl.printed)
+
+
+def test_start_late_is_null_for_a_benchmark_only_run(run_main, rec_tl, tmp_path):
+    path = tmp_path / "out.json"
+    run_main(["benchmark"], tl=rec_tl, start_at=time.time() + 60, json_path=str(path))
+    assert json.loads(path.read_text())["start_late_s"] is None

@@ -1753,8 +1753,9 @@ def build_json_summary(options, started, key_stats, late_starts, sync_estimated,
 			'start_at': options.start_at,
 			'block_size': None if options.block_size is None else int(options.block_size),
 			'verify': options.verify, 'timeline': options.timeline},
-		# how long the synchronized first pass started after --start_at; null without it
-		'start_late_s': None if options.start_at is None else (start_late[0] if start_late else 0.0),
+		# how long the synchronized first pass started after --start_at; null without it, and when no pass ran to
+		# start then (a failed simultaneous layout skips its pass, a benchmark-only run has none), not "on time"
+		'start_late_s': start_late[0] if start_late else None,
 		'results': results,
 		'failed_ops': sum(stats['failed'] for stats in key_stats.values()),
 		'report_errors': list(report_errors),
