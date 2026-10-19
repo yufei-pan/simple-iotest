@@ -1,5 +1,6 @@
 import json
 import math
+import sys
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,10 @@ def test_tuning_attempt_readers_find_the_layout_of_a_larger_count(iotest_mod, wo
     assert sorted(p.name for p in simul.iterdir()) == [f"worker_{c:04d}" for c in range(11)]
 
 
+# what writing to a directory raises: Windows refuses it as a permission error
+BLOCKED_ERROR = "PermissionError" if sys.platform == "win32" else "IsADirectoryError"
+
+
 def block_layout(iotest_mod, work_dir, run_id, counters, name="read_1.bin"):
     # a directory where a read file belongs makes that layout write fail
     for counter in counters:
@@ -94,7 +99,7 @@ def test_layout_write_failure_skips_the_timed_pass_and_is_reported(iotest_mod, r
     # under a key of their own, with no times: layout writes are not timed
     assert result["outResults"] == {"layout": []}
     assert len(result["failedOps"]["layout"]) == 2
-    assert all("IsADirectoryError" in error for error in result["failedOps"]["layout"])
+    assert all(BLOCKED_ERROR in error for error in result["failedOps"]["layout"])
     assert result["mode_process_counts"] == {"layout": 2}
     assert iotest_mod.total_failed_ops(result) == 2
     assert not (Path(work_dir) / ".iotest_simul_lf").exists()
@@ -128,20 +133,20 @@ def test_a_partly_failed_layout_reports_its_failures_everywhere(iotest_mod, run_
     assert iotest_mod.total_failed_ops(result) == 1
     report = "\n".join(rec_tl.printed)
     assert "Report for layout mode:" in report
-    assert "Failed layout ops:      \t1 of 4, first error: IsADirectoryError" in report
+    assert "Failed layout ops:      \t1 of 4, first error: " + BLOCKED_ERROR in report
     assert "Layout writes are not timed, and the timed simultaneous pass did not run." in report
     data = json.loads(json_path.read_text())
     assert data["failed_ops"] == 1
     entry = data["results"]["layout"]
     assert entry["ops"] == 0 and entry["failed"] == 1 and entry["process_count"] == 2
-    assert entry["first_error"].startswith("IsADirectoryError")
+    assert entry["first_error"].startswith(BLOCKED_ERROR)
     assert entry["latency_s"] is None and entry["total_bytes"] is None
     (report_file,) = work_dir.glob("*_report.txt")
     assert "Failed layout ops:      \t1 of 4" in report_file.read_text()
     (csv_file,) = work_dir.glob("iotest_*.csv")
     assert csv_file.read_text().splitlines() == ["layout_time"]
     (request,) = received()
-    assert request["json"]["content"].startswith("Short Report for layout mode: 1 of 4 ops failed, first error: IsADirectoryError")
+    assert request["json"]["content"].startswith("Short Report for layout mode: 1 of 4 ops failed, first error: " + BLOCKED_ERROR)
 
 
 @pytest.mark.patches_workers
