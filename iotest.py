@@ -38,7 +38,7 @@ try:
 except ImportError:
 	numpy_available = False
 
-version = '3.70.0'
+version = '3.70.1'
 COMMIT_DATE = '2026-10-18'
 __version__ = version
 
