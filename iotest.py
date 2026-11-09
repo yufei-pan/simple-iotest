@@ -39,7 +39,7 @@ except ImportError:
 	numpy_available = False
 
 version = '3.70.1'
-COMMIT_DATE = '2026-11-07'
+COMMIT_DATE = '2026-11-08'
 __version__ = version
 
 # --------------------------------
