@@ -283,8 +283,8 @@ def test_simultaneous_reader_allocates_its_buffer_before_the_start_barrier(iotes
     monkeypatch.setattr(iotest_mod, "bytearray", spy, raising=False)
     start = iotest_mod.time.perf_counter() + 0.3
     results = []
-    iotest_mod.simultaneous_role_worker("read", 1, 4096, str(work_dir), "t", iotest_mod.worker_counter_name(0),
-        results, True, True, start)
+    iotest_mod.worker(1, 4096, str(work_dir), results, "read", iotest_mod.worker_counter_name(0), True, True, start,
+        simultaneous_run_id="t")
     assert len(made_at) == 1 and made_at[0] < start
     assert not [s for s in iotest_mod.result_samples(results) if isinstance(s, str)]
 
@@ -308,7 +308,7 @@ def test_quiet_simultaneous_workers_build_no_per_op_log_line(iotest_mod, work_di
     iotest_mod.layout_read_worker(3, 1024, str(work_dir), "t", "0000", True, True)
     monkeypatch.setattr(iotest_mod, "format_op", lambda *a: pytest.fail("a log line was built"))
     results = []
-    iotest_mod.simultaneous_role_worker(role, 3, 1024, str(work_dir), "t", "0000", results, True, True, 0)
+    iotest_mod.worker(3, 1024, str(work_dir), results, role, "0000", True, True, 0, simultaneous_run_id="t")
     assert not [s for s in iotest_mod.result_samples(results) if isinstance(s, str)]
 
 

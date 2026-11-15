@@ -112,7 +112,7 @@ def spy_worker_sinks(iotest_mod, monkeypatch):
 
     def spy(*args, **kwargs):
         target = kwargs["target"]
-        if target in (iotest_mod.worker, iotest_mod.simultaneous_role_worker):
+        if target is iotest_mod.worker:
             bound = inspect.signature(target).bind(*kwargs["args"])
             sinks.append((target.__name__, bound.arguments.get("timeline")))
         return real(*args, **kwargs)
@@ -125,7 +125,6 @@ def spy_worker_sinks(iotest_mod, monkeypatch):
 def test_workers_get_a_timeline_sink_only_with_timeline(run_main, iotest_mod, monkeypatch, rec_tl, timeline):
     sinks = spy_worker_sinks(iotest_mod, monkeypatch)
     run_main(["write", "simultaneous", "meta"], process_count=2, tl=rec_tl, no_report=False, timeline=timeline)
-    assert {name for name, _ in sinks} == {"worker", "simultaneous_role_worker"}
     # write 2 + simultaneous 1 + 1 + meta 3 x 2
     assert len(sinks) == 10
     assert all((sink is not None) == timeline for _, sink in sinks)
@@ -149,7 +148,7 @@ def test_worker_without_a_sink_records_nothing(iotest_mod, work_dir, monkeypatch
     monkeypatch.setattr(iotest_mod, "OpTimeline", no_timeline)
     results = []
     iotest_mod.worker(2, 1024, str(work_dir), results, "write", "0", True, True, 0)
-    iotest_mod.simultaneous_role_worker("write", 2, 1024, str(work_dir), "t", "0", results, True, True, 0)
+    iotest_mod.worker(2, 1024, str(work_dir), results, "write", "0", True, True, 0, simultaneous_run_id="t")
     # one results record each
     assert len(results) == 2
     assert len(list(iotest_mod.result_samples(results))) == 4
@@ -266,8 +265,8 @@ def test_a_failed_timeline_hand_over_comes_before_the_results(iotest_mod, work_d
             iotest_mod.worker(3, 1024, str(work_dir), results, "write", "0000", True, True, 0, timeline=FailingSink())
         else:
             iotest_mod.layout_read_worker(3, 1024, str(work_dir), "t", "0000", True, True)
-            iotest_mod.simultaneous_role_worker(role, 3, 1024, str(work_dir), "t", "0000", results, True, True, 0,
-                timeline=FailingSink())
+            iotest_mod.worker(3, 1024, str(work_dir), results, role, "0000", True, True, 0, timeline=FailingSink(),
+                simultaneous_run_id="t")
     assert results == []
 
 
