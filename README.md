@@ -2,7 +2,7 @@
 
 Ever feel like fio is too complicated and too optimized? Well, simple-iotest covers this for you!
 
-Using the most simple non-optimized write() or writev() with fallback to python f.write() (just like your code!) to test file system io performance.
+Using the most simple non-optimized write() or writev() (just like your code!) to test file system io performance.
 
 Warning: each worker holds a whole test file in memory (random and comprehensive workers two of them), unless `-bs` is set: then up to 16 MiB of test data and one block. iotest also keeps about 80 to 140 bytes per operation for the results until the run ends (70 to 110 more with `-tl`). Before it starts, it estimates the memory the run needs: if that is more than the available memory plus swap, it lowers the process count; if it is more than 90% of the available memory, it warns and waits 15 seconds before going on.
 

@@ -328,34 +328,21 @@ def file_chunks(buffer, file_size, block_size, stamped=False):
 			yield offset, view[start:start + min(step, file_size - offset)]
 	return chunks()
 
-def write_chunk(f, chunk, offset, file_name, file_size, quiet):
+def write_chunk(f, chunk, offset, file_name, file_size):
+	# a write the OS refuses fails the op on its first error: a retry would make the same call again
 	written = 0
 	while written < len(chunk):
 		part = chunk[written:written + MAX_IO_CHUNK]
-		try:
-			if os.name == 'posix':
-				n = os.writev(f.fileno(), [part])
-			else:
-				n = os.write(f.fileno(), part)
-		except OSError:
-			worker_log('Failed to write using os.writev, trying f.write', level='warning', quiet=quiet)
-			n = f.write(part)
+		n = os.writev(f.fileno(), [part]) if os.name == 'posix' else os.write(f.fileno(), part)
 		if not n:
 			raise OSError(f"{file_name}: write stopped after {offset + written} of {file_size} bytes")
 		written += n
 
-def read_chunk(f, chunk, offset, file_name, file_size, quiet):
+def read_chunk(f, chunk, offset, file_name, file_size):
 	got = 0
 	while got < len(chunk):
 		part = chunk[got:got + MAX_IO_CHUNK]
-		try:
-			if os.name == 'posix':
-				n = os.readv(f.fileno(),[part])
-			else:
-				n = f.readinto(part)
-		except OSError:
-			worker_log('Failed to read using os.readv, trying f.readinto', level='warning', quiet=quiet)
-			n = f.readinto(part)
+		n = os.readv(f.fileno(), [part]) if os.name == 'posix' else f.readinto(part)
 		if not n:
 			raise OSError(f"{file_name}: read hit end of file after {offset + got} of {file_size} bytes")
 		got += n
@@ -373,7 +360,7 @@ def create_file(file_name, file_content, file_size, quiet=False, block_size=None
 					stamp(chunk, offset)
 				if seal is not None:
 					seal(chunk, offset)
-				write_chunk(f, chunk, offset, file_name, file_size, quiet)
+				write_chunk(f, chunk, offset, file_name, file_size)
 			os.fsync(f.fileno())
 			end_write_time = time.perf_counter()
 			# after the sync the pages are clean and can be dropped; before the write the file is empty
@@ -425,7 +412,7 @@ def read_file(file_name, file_size, quiet=False, buffer=None, recreate=None, blo
 			chunks = file_chunks(b, file_size, block_size)
 			start_read_time = time.perf_counter()
 			for offset, chunk in chunks:
-				read_chunk(f, chunk, offset, file_name, file_size, quiet)
+				read_chunk(f, chunk, offset, file_name, file_size)
 				if trailer is not None and block_size:
 					# the next chunk reuses the buffer, so the CRC is taken now, inside the timed read
 					trailer.check(chunk, offset)
