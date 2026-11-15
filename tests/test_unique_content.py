@@ -127,7 +127,7 @@ def test_unique_read_checks_each_file_once(iotest_mod, work_dir, monkeypatch):
     # the check runs inside the measured wall-clock window; read_file already does it
     iotest_mod.worker(3, 4096, str(work_dir), [], "write", "0", True, True, 0)
     calls = []
-    real = iotest_mod.file_needs_recreate
-    monkeypatch.setattr(iotest_mod, "file_needs_recreate", lambda *a: calls.append(a) or real(*a))
+    real = iotest_mod.existing_size
+    monkeypatch.setattr(iotest_mod, "existing_size", lambda *a: calls.append(a) or real(*a))
     iotest_mod.worker(3, 4096, str(work_dir), [], "read", "0", True, True, 0, True)
     assert len(calls) == 3

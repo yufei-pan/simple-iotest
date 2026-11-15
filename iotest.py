@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 import time
+import traceback
 import urllib.parse
 import urllib.request
 import zlib
@@ -298,6 +299,20 @@ def disable_os_cache(fd):
 	except OSError:
 		pass
 
+def drop_cached_pages(fd, file_size, quiet):
+	try:
+		if os.name == 'posix':
+			os.posix_fadvise(fd, 0, file_size, os.POSIX_FADV_DONTNEED)
+	except (AttributeError, OSError):
+		# AttributeError: macOS is posix but has no posix_fadvise
+		worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
+
+def failed_op(e, quiet):
+	# what a file helper returns when its op fails: (None, the error text), logged with its traceback
+	worker_log(str(e), level='error', quiet=quiet)
+	worker_log(traceback.format_exc(), level='error', quiet=quiet)
+	return None, f'{type(e).__name__}: {e}'
+
 def file_chunks(buffer, file_size, block_size, stamped=False):
 	# (offset in the file, view) for each part of the file one write/read is asked for: the whole file at once,
 	# or with -bs block_size bytes at a time, each from its place in the buffer (chunk_span()). stamped: each
@@ -362,18 +377,10 @@ def create_file(file_name, file_content, file_size, quiet=False, block_size=None
 			os.fsync(f.fileno())
 			end_write_time = time.perf_counter()
 			# after the sync the pages are clean and can be dropped; before the write the file is empty
-			try:
-				if os.name == 'posix':
-					os.posix_fadvise(f.fileno(), 0, file_size, os.POSIX_FADV_DONTNEED)
-			except (AttributeError, OSError):
-				# AttributeError: macOS is posix but has no posix_fadvise
-				worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
+			drop_cached_pages(f.fileno(), file_size, quiet)
 			return start_write_time,end_write_time
 	except Exception as e:
-		import traceback
-		worker_log(str(e), level='error', quiet=quiet)
-		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return None,f'{type(e).__name__}: {e}'
+		return failed_op(e, quiet)
 
 def move_file(src, dst, quiet=False):
 	start_move_time = time.perf_counter()
@@ -382,10 +389,7 @@ def move_file(src, dst, quiet=False):
 		end_move_time = time.perf_counter()
 		return start_move_time,end_move_time
 	except Exception as e:
-		import traceback
-		worker_log(str(e), level='error', quiet=quiet)
-		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return None,f'{type(e).__name__}: {e}'
+		return failed_op(e, quiet)
 
 def existing_size(path):
 	# one stat: the size of a regular file, 0 for anything else or nothing
@@ -395,15 +399,12 @@ def existing_size(path):
 		return 0
 	return st.st_size if stat.S_ISREG(st.st_mode) else 0
 
-def file_needs_recreate(file_name, file_size):
-	return existing_size(file_name) != file_size
-
 def read_file(file_name, file_size, quiet=False, buffer=None, recreate=None, block_size=None, verify=False):
 	# workers pass one reused buffer; a fresh one costs a zero-fill per read (~150 ms/GiB)
 	b = buffer if buffer is not None else bytearray(block_size or file_size)
 	# check if file exists and size is correct: one stat, inside the timed pass
 	try:
-		if file_needs_recreate(file_name, file_size):
+		if existing_size(file_name) != file_size:
 			if recreate is None:
 				# nothing to write it with: a failed read
 				error = f"{file_name} is missing or not {file_size} bytes"
@@ -420,12 +421,7 @@ def read_file(file_name, file_size, quiet=False, buffer=None, recreate=None, blo
 		trailer = CrcTrailer(file_size) if verify else None
 		with open(file_name, "rb", buffering=0) as f:
 			disable_os_cache(f.fileno())
-			try:
-				if os.name == 'posix':
-					os.posix_fadvise(f.fileno(), 0, file_size, os.POSIX_FADV_DONTNEED)
-			except (AttributeError, OSError):
-				# AttributeError: macOS is posix but has no posix_fadvise
-				worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
+			drop_cached_pages(f.fileno(), file_size, quiet)
 			chunks = file_chunks(b, file_size, block_size)
 			start_read_time = time.perf_counter()
 			for offset, chunk in chunks:
@@ -444,11 +440,8 @@ def read_file(file_name, file_size, quiet=False, buffer=None, recreate=None, blo
 				return None, mismatch
 		return start_read_time,end_read_time
 	except Exception as e:
-		import traceback
-		worker_log(str(e), level='error', quiet=quiet)
-		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return None,f'{type(e).__name__}: {e}'
-	
+		return failed_op(e, quiet)
+
 
 def index_file(file_name, quiet=False):
 	try:
@@ -463,13 +456,9 @@ def index_file(file_name, quiet=False):
 		os.rmdir(index_folder)
 		end_index_time = time.perf_counter()
 		return start_index_time,end_index_time
-
 	except Exception as e:
-		import traceback
-		worker_log(str(e), level='error', quiet=quiet)
-		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return None,f'{type(e).__name__}: {e}'
-	
+		return failed_op(e, quiet)
+
 def stat_file(file_name, quiet=False):
 	start_stat_time = time.perf_counter()
 	try:
@@ -477,10 +466,7 @@ def stat_file(file_name, quiet=False):
 		end_stat_time = time.perf_counter()
 		return start_stat_time,end_stat_time,size
 	except Exception as e:
-		import traceback
-		worker_log(str(e), level='error', quiet=quiet)
-		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return None,f'{type(e).__name__}: {e}',0
+		return failed_op(e, quiet) + (0,)
 
 META_PHASES = ('create', 'stat', 'unlink')
 
