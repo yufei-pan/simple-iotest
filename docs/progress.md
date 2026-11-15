@@ -8,6 +8,7 @@ Open work lives here and nowhere else (RULES, "Long work: the progress file"). E
 ## Open work
 
 ### Release riders (no written plan; the user's pick is quoted in the row)
+- **Building (started 2026-11-14):** branch feat/simplify (worktree iotest-simplify), with the simplify pass below; the rows of this section are in the build.
 - **Add Python 3.11 to the GitHub CI matrix.** State: not started. Where: `.github/workflows/test.yml`, the first job's matrix `["3.9", "3.12", "3.14"]` on master ab2623b; add `"3.11"` in the commit of the repo's next release push. No next release is queued (the 3.70.1 release notes say "Nothing queued"), so this rides whichever release comes next. The other jobs (numpy on 3.12, the Python 3.6 container, lint, macOS and Windows on 3.12) stay as they are. From: the user, 2026-11-12: "Add 3.11 to CI (Recommended)", for every repo's next release.
 
 ### The simplify pass (no written plan)
