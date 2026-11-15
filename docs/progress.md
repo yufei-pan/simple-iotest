@@ -30,7 +30,7 @@ The user's rulings on how the cas repos are worked, one line each; a line change
 - macOS (2026-11-11): tests run on the user's own always-on Mac, as a standard user made for them, never with sudo.
 
 ## Questions waiting for the user
-- **3.71.0, the simplify pass: remove the os.writev/os.readv retry through f.write/f.readinto?** (written in full 2026-11-15) f.write makes the same write(2) call the kernel just refused, so the retry fails the same way, except for an error that clears within microseconds (for example an EIO from a soft NFS mount), which it hides from the benchmark today. Without it, the operator sees such a write or read fail on its first try with the error text iotest already prints; the `-v` line "Failed to write using os.writev, trying f.write" goes, and README line 5 loses "with fallback to python f.write()". It saves about 8 lines and 2 tests (about 30 lines). (a) Remove it (recommended: it cannot help, and in a storage test it can hide a real failure). (b) Keep it. Waits on it: the final suites, the benchmark and the release. Words it would drop: none; the pass is the user's ask, 2026-10-23: "simplify and drop any stuff that are dead weight".
+- None. Decided 2026-11-15, a chief's decision (not the user's words): remove the os.writev/os.readv retry through f.write/f.readinto; the release notes say that a write or read now fails on its first error.
 
 ## Closed
 - None.
