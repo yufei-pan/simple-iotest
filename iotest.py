@@ -1048,20 +1048,18 @@ def addToDicWithoutOverwrite(dic,key,value):
 	else:
 		dic[key] = value
 
-def add_op_results(outResults, failedOps, key, samples):
-	# failed ops carry their error text instead of a duration (see op_time).
-	# Always add to both dicts so repeated keys get renamed in lockstep.
+def add_key(keys, key, samples, process_count, total_time=None, late=(), estimated=False, planned_ops=None):
+	# one result key of a pass, as one record: its op times and failed ops (a failed op carries its error text
+	# instead of a duration, see op_time), the pass's wall time, the workers that ran it and how late they started.
+	# planned_ops: the read files of a failed simultaneous layout pass. A repeated key is renamed (write_1,
+	# write_2, ...) with all its figures; returns the record
 	times, failed = [], []
 	for sample in samples:
 		(failed if isinstance(sample, str) else times).append(sample)
-	addToDicWithoutOverwrite(outResults, key, times)
-	addToDicWithoutOverwrite(failedOps, key, failed)
-	return times
-
-def record_pass_meta(late_starts, sync_estimated, key, late, estimated):
-	# kept in lockstep with outResults, so a repeated key is renamed in all of them
-	addToDicWithoutOverwrite(late_starts, key, (len(late), max(late) if late else 0.0))
-	addToDicWithoutOverwrite(sync_estimated, key, estimated)
+	record = {'times': times, 'failed': failed, 'total_time': total_time, 'process_count': process_count,
+		'late': (len(late), max(late) if late else 0.0), 'estimated': estimated, 'planned_ops': planned_ops}
+	addToDicWithoutOverwrite(keys, key, record)
+	return record
 
 def warn_late_starts(tl, mode, late, process_count):
 	if late:
@@ -1510,12 +1508,12 @@ def format_key_report(mode, stats, late, estimated, zeros, dedup_notes, planned_
 	report.append("-"*80)
 	return report
 
-def build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors, start_late=()):
+def build_json_summary(options, started, key_stats, keys, report_errors, start_late=()):
 	results = {}
 	for key, stats in key_stats.items():
 		entry = dict(stats)
-		entry['sync_estimated'] = bool(sync_estimated.get(key))
-		late_n, late_max = late_starts.get(key, (0, 0.0))
+		entry['sync_estimated'] = keys[key]['estimated']
+		late_n, late_max = keys[key]['late']
 		entry['late_workers'] = late_n
 		entry['max_late_s'] = late_max
 		results[key] = entry
@@ -1619,16 +1617,10 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		for note in dedup_notes:
 			tl.teelog(note, level='warning')
 	processes = []
-	outResults = dict()
-	failedOps = {}
-	# the read files each failed layout pass was to write, under its key in outResults
-	layout_files = {}
-	late_starts = {}
+	# result key -> its record (add_key())
+	keys = {}
 	start_notes = []
 	start_late = []
-	sync_estimated = {}
-	totalTime = {}
-	mode_process_counts = {}
 	scan = None
 	if any(mode in ('write', 'random', 'read') for mode in modes):
 		# one os.stat per temp file, for the free-space check and for which read workers recreate files
@@ -1774,13 +1766,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 						layout_failures = run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
 							quiet, zeros, tl, unique, block_size, verify, manager)
 						if layout_failures:
-							# a key of their own, kept in lockstep like the others (layout_1, layout_2, ... when
-							# several passes fail), so the report, the JSON and the report files show them and the
-							# run exits 1. The layout's writes are not timed: it has failures and no times
-							add_op_results(outResults, failedOps, 'layout', layout_failures)
-							addToDicWithoutOverwrite(layout_files, 'layout', file_count * layout_worker_count)
-							addToDicWithoutOverwrite(mode_process_counts, 'layout', layout_worker_count)
-							record_pass_meta(late_starts, sync_estimated, 'layout', (), False)
+							# a key of their own (layout_1, layout_2, ... when several passes fail), so the report,
+							# the JSON and the report files show them and the run exits 1. The layout's writes are
+							# not timed: it has failures and no times
+							add_key(keys, 'layout', layout_failures, layout_worker_count,
+								planned_ops=file_count * layout_worker_count)
 							# the finally below still cleans the tree up
 							continue
 					write_results = manager.list()
@@ -1813,14 +1803,10 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					# one bulk fetch per list: iterating a proxy costs a round trip per item
 					write_results, read_results = write_results[:], read_results[:]
 					write_late, read_late = write_late[:], read_late[:]
-					add_op_results(outResults, failedOps, 'write', itertools.chain(result_samples(write_results), dead_worker_errors(write_processes, file_count)))
-					add_op_results(outResults, failedOps, 'read', itertools.chain(result_samples(read_results), dead_worker_errors(read_processes, file_count)))
-					addToDicWithoutOverwrite(totalTime, 'write', write_sync_time)
-					addToDicWithoutOverwrite(totalTime, 'read', read_sync_time)
-					addToDicWithoutOverwrite(mode_process_counts, 'write', write_count)
-					addToDicWithoutOverwrite(mode_process_counts, 'read', read_count)
-					record_pass_meta(late_starts, sync_estimated, 'write', write_late, False)
-					record_pass_meta(late_starts, sync_estimated, 'read', read_late, False)
+					add_key(keys, 'write', itertools.chain(result_samples(write_results), dead_worker_errors(write_processes, file_count)),
+						write_count, write_sync_time, write_late)
+					add_key(keys, 'read', itertools.chain(result_samples(read_results), dead_worker_errors(read_processes, file_count)),
+						read_count, read_sync_time, read_late)
 					collect_timeline(timeline_passes, pass_timeline, pass_index, mode)
 					warn_late_starts(tl, 'simultaneous', write_late + read_late, process_count)
 				finally:
@@ -1855,65 +1841,41 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			collect_timeline(timeline_passes, pass_timeline, pass_index, 'meta' if mode.startswith('meta_') else mode)
 			if mode == 'comprehensive':
 				# a worker's record holds each file's write, move, stat and read in turn
-				writes, moves, stats, reads = [add_op_results(outResults, failedOps, key,
-					itertools.chain(result_samples(results, every=4, offset=offset), dead_errors))
-					for offset, key in enumerate(('write', 'move', 'stat', 'read'))]
-				sumWTime = sum(writes)
-				sumMTime = sum(moves)
-				sumSTime = sum(stats)
-				sumRTime = sum(reads)
-				sumAllTime = sumWTime + sumMTime + sumSTime + sumRTime
-				for key in ('write','move','stat','read'):
-					addToDicWithoutOverwrite(mode_process_counts,key,process_count)
-					record_pass_meta(late_starts, sync_estimated, key, late, True)
-				if sumAllTime > 0:
-					addToDicWithoutOverwrite(totalTime,'write',totalEndTime * (sumWTime / sumAllTime))
-					addToDicWithoutOverwrite(totalTime,'move',totalEndTime * (sumMTime / sumAllTime))
-					addToDicWithoutOverwrite(totalTime,'stat',totalEndTime * (sumSTime / sumAllTime))
-					addToDicWithoutOverwrite(totalTime,'read',totalEndTime * (sumRTime / sumAllTime))
-				else:
-					addToDicWithoutOverwrite(totalTime,'write',totalEndTime)
-					addToDicWithoutOverwrite(totalTime,'move',totalEndTime)
-					addToDicWithoutOverwrite(totalTime,'stat',totalEndTime)
-					addToDicWithoutOverwrite(totalTime,'read',totalEndTime)
+				records = [add_key(keys, key, itertools.chain(result_samples(results, every=4, offset=offset), dead_errors),
+					process_count, late=late, estimated=True) for offset, key in enumerate(('write', 'move', 'stat', 'read'))]
+				# the pass's wall time, split across the four by their share of op time
+				sums = [sum(record['times']) for record in records]
+				for record, part in zip(records, sums):
+					record['total_time'] = totalEndTime * (part / sum(sums)) if sum(sums) > 0 else totalEndTime
 			elif mode == 'random':
 				# each op's kind is in its worker's record; dead workers never reported, so their kind is unknown
 				for kind in ('write', 'read'):
 					if any(OP_CODES[kind] in kinds for _, kinds, _ in results):
-						add_op_results(outResults,failedOps,'random_' + kind,result_samples(results, kind=OP_CODES[kind]))
-						addToDicWithoutOverwrite(totalTime,'random_' + kind,totalEndTime)
-						addToDicWithoutOverwrite(mode_process_counts,'random_' + kind,process_count)
-						record_pass_meta(late_starts, sync_estimated, 'random_' + kind, late, False)
+						add_key(keys, 'random_' + kind, result_samples(results, kind=OP_CODES[kind]), process_count, totalEndTime, late)
 				if dead_errors:
-					add_op_results(outResults,failedOps,'random',dead_errors)
-					addToDicWithoutOverwrite(totalTime,'random',totalEndTime)
-					addToDicWithoutOverwrite(mode_process_counts,'random',process_count)
-					record_pass_meta(late_starts, sync_estimated, 'random', late, False)
+					add_key(keys, 'random', dead_errors, process_count, totalEndTime, late)
 			else:
-				add_op_results(outResults,failedOps,mode,itertools.chain(result_samples(results), dead_errors))
-				addToDicWithoutOverwrite(totalTime,mode,totalEndTime)
-				addToDicWithoutOverwrite(mode_process_counts,mode,process_count)
-				record_pass_meta(late_starts, sync_estimated, mode, late, False)
+				add_key(keys, mode, itertools.chain(result_samples(results), dead_errors), process_count, totalEndTime, late)
 			warn_late_starts(tl, mode, late, process_count)
 	report_errors = []
-	writes_reports = not options.no_report and bool(outResults)
+	writes_reports = not options.no_report and bool(keys)
 	# an explicit --timeline is written also with -nr (and -S), like --json
-	writes_timeline = timeline_passes is not None and bool(outResults)
+	writes_timeline = timeline_passes is not None and bool(keys)
 	if writes_reports or writes_timeline:
 		report_base = os.path.join(primary_directory, report_base_name(modes, directories, file_size, file_count, process_count, tl.currentDateTime))
 	report = list(start_notes)
 	short_reports = []
 	threshold_to_report_anomaly = options.threshold_to_report_anomaly
 	key_stats = {}
-	for mode in outResults:
-		stats = summarize_key(outResults[mode], failedOps.get(mode, []), mode_process_counts.get(mode, process_count), totalTime.get(mode), file_size, 'write' in mode or 'read' in mode)
+	for mode, record in keys.items():
+		stats = summarize_key(record['times'], record['failed'], record['process_count'], record['total_time'], file_size, 'write' in mode or 'read' in mode)
 		key_stats[mode] = stats
-		failed = failedOps.get(mode, [])
-		planned_ops = layout_files.get(mode)
+		failed = record['failed']
+		planned_ops = record['planned_ops']
 		op_count = stats['ops'] + stats['failed'] if planned_ops is None else planned_ops
 		failed_note = f", {stats['failed']} of {op_count} ops failed" if failed else ''
-		report.extend(format_key_report(mode, stats, late_starts.get(mode, (0, 0.0)), sync_estimated.get(mode), zeros, dedup_notes, planned_ops))
-		if not outResults[mode]:
+		report.extend(format_key_report(mode, stats, record['late'], record['estimated'], zeros, dedup_notes, planned_ops))
+		if not record['times']:
 			if options.message_end_point_address and failed:
 				failed_text = f"all {op_count}" if stats['failed'] == op_count else f"{stats['failed']} of {op_count}"
 				short_reports.append(f"Short Report for {mode} mode: {failed_text} ops failed, first error: {failed[0]}")
@@ -1938,9 +1900,9 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		csv_file_name = report_base + REPORT_SUFFIXES[0]
 		def write_csv(f):
 			# the headers are just the keys in the dic, the values are the list of results
-			f.write(','.join([key+'_time' for key in outResults.keys()]) + '\n')
+			f.write(','.join([key+'_time' for key in keys]) + '\n')
 			# columns can differ in length (uneven simultaneous splits, failed ops), so pad short ones with blank cells
-			for row in itertools.zip_longest(*outResults.values(), fillvalue=''):
+			for row in itertools.zip_longest(*(record['times'] for record in keys.values()), fillvalue=''):
 				f.write(','.join(map(str,row)) + '\n')
 		if write_report_file(csv_file_name, write_csv, tl, report_errors):
 			tl.teeprint(f"\nResults written to {csv_file_name}")
@@ -1954,7 +1916,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	if writes_reports:
 		print(f"Log file: {tl.logFileName}")
 	if options.json_path:
-		write_json_summary(options.json_path, build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors, start_late), tl, report_errors)
+		write_json_summary(options.json_path, build_json_summary(options, started, key_stats, keys, report_errors, start_late), tl, report_errors)
 	if options.cleanup:
 		# only after passes that use the temp files: -pc 64 -fc 100000 meta would otherwise try 6.4 million
 		# unlinks of files that never existed. Meta passes clean up their own directories
@@ -1964,16 +1926,18 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			cleanup_meta_dirs(directories, process_count)
 	if options.message_end_point_address and short_reports:
 		send_short_reports(options.message_end_point_address, short_reports, tl)
+	def by_key(field):
+		return {key: record[field] for key, record in keys.items() if record[field] is not None}
 	return {
-		'outResults': outResults,
-		'totalTime': totalTime,
+		'outResults': by_key('times'),
+		'totalTime': by_key('total_time'),
 		'process_count': process_count,
 		'file_size': file_size,
 		'file_count': file_count,
-		'mode_process_counts': mode_process_counts,
-		'failedOps': failedOps,
-		'late_starts': late_starts,
-		'sync_estimated': sync_estimated,
+		'mode_process_counts': by_key('process_count'),
+		'failedOps': by_key('failed'),
+		'late_starts': by_key('late'),
+		'sync_estimated': by_key('estimated'),
 		'report_errors': report_errors,
 	}
 
