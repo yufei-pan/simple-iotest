@@ -569,11 +569,11 @@ def result_samples(records, kind=None, every=1, offset=0):
 
 class OpTimeline:
 	# one worker's ops of one pass in typed arrays (21 bytes an op), handed to the parent as one record
-	def __init__(self, counter, base, file_count):
+	def __init__(self, counter, base):
 		self.counter = counter
 		self.base = base
 		self.ops = array.array('B')
-		self.file_indexes = array.array('I' if file_count <= 0xFFFFFFFF else 'Q')
+		self.file_indexes = array.array('I')
 		self.starts = array.array('d')
 		self.durations = array.array('d')
 		# position -> error text of the failed ops, whose duration is NaN
@@ -596,7 +596,7 @@ class OpTimeline:
 		# plain bytes, which the manager can hold whatever the start method. Pickle copies an array's data
 		# to bytes and keeps that copy until the whole transfer ends, so as bytes a pass's records take one
 		# copy less in the manager and in the parent
-		return (self.counter, self.file_indexes.typecode, self.ops.tobytes(), self.file_indexes.tobytes(),
+		return (self.counter, self.ops.tobytes(), self.file_indexes.tobytes(),
 			self.starts.tobytes(), self.durations.tobytes(), self.errors)
 
 def worker_color_log(color, msg, quiet=False):
@@ -622,7 +622,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 	local_results = []
 	local_kinds = [] if mode == 'random' else None
 	# only with --timeline; without it the loop below does no timeline work beyond a None check
-	local_timeline = OpTimeline(counter, thread_start_time, file_count) if timeline is not None else None
+	local_timeline = OpTimeline(counter, thread_start_time) if timeline is not None else None
 	log = functools.partial(worker_color_log, int_to_color(os.getpid()), quiet=quiet)
 	log(f'Worker {counter} scheduled to start at {thread_start_time-time.perf_counter():.4f} later in {mode} mode.')
 	# read workers create content only if a file must be recreated; index never needs any
@@ -1405,8 +1405,8 @@ def collect_timeline(timeline_passes, pass_timeline, pass_index, mode):
 
 def timeline_ops(record):
 	# one worker's ops of one pass, in the order it ran them, so by start: (start, op, worker, file_index, duration, error)
-	counter, index_type, ops, file_indexes, starts, durations, errors = record
-	file_indexes = memoryview(file_indexes).cast(index_type)
+	counter, ops, file_indexes, starts, durations, errors = record
+	file_indexes = memoryview(file_indexes).cast('I')
 	starts = memoryview(starts).cast('d')
 	durations = memoryview(durations).cast('d')
 	for position, start in enumerate(starts):
