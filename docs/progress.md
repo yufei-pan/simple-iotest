@@ -8,11 +8,11 @@ Open work lives here and nowhere else (RULES, "Long work: the progress file"). E
 ## Open work
 
 ### Release riders (no written plan; the user's pick is quoted in the row)
-- **Building (started 2026-11-14):** branch feat/simplify (worktree iotest-simplify), with the simplify pass below; the rows of this section are in the build.
-- **Add Python 3.11 to the GitHub CI matrix.** State: not started. Where: `.github/workflows/test.yml`, the first job's matrix `["3.9", "3.12", "3.14"]` on master ab2623b; add `"3.11"` in the commit of the repo's next release push. No next release is queued (the 3.70.1 release notes say "Nothing queued"), so this rides whichever release comes next. The other jobs (numpy on 3.12, the Python 3.6 container, lint, macOS and Windows on 3.12) stay as they are. From: the user, 2026-11-12: "Add 3.11 to CI (Recommended)", for every repo's next release.
+- **Paused 2026-11-14 at the user's ask, building:** branch feat/simplify (worktree iotest-simplify) at d1f03ef, 12 commits on a771fcf: the simplify pass (iotest.py 2,790 to 2,470 lines, behaviour unchanged), Python 3.11 in CI (10a8ffd), and a WIP commit for version 3.71.0. Left: the full suites on d1f03ef (3.14, 3.11, numpy, 3.6), the real benchmark before and after, a docs/limitations.md with one deferred entry (`iotest -pc 1 simultaneous` crashes with a traceback, as in 3.70.1), the release-notes draft. One question for the user waits (below).
+- **Add Python 3.11 to the GitHub CI matrix.** State: built (10a8ffd), rides 3.71.0. Where: `.github/workflows/test.yml`, the first job's matrix `["3.9", "3.12", "3.14"]` on master ab2623b; add `"3.11"` in the commit of the repo's next release push. No next release is queued (the 3.70.1 release notes say "Nothing queued"), so this rides whichever release comes next. The other jobs (numpy on 3.12, the Python 3.6 container, lint, macOS and Windows on 3.12) stay as they are. From: the user, 2026-11-12: "Add 3.11 to CI (Recommended)", for every repo's next release.
 
 ### The simplify pass (no written plan)
-- **Simplify and drop dead weight, as the other cas tools had.** State: not started; rides with the next release. Where: remove what no operator needs (dead code, guards for states that cannot happen, extra layers), behaviour unchanged, reviewed like a release. From: the user, 2026-10-23: "maybe we should go through the repos after this round, then simplify and drop any stuff that are dead weight?"; for firewatcher, simple-iotest and tsvz-rs, "Run it on all three (Recommended)", 2026-11-14.
+- **Simplify and drop dead weight, as the other cas tools had.** State: building on feat/simplify (row above). Where: remove what no operator needs (dead code, guards for states that cannot happen, extra layers), behaviour unchanged, reviewed like a release. From: the user, 2026-10-23: "maybe we should go through the repos after this round, then simplify and drop any stuff that are dead weight?"; for firewatcher, simple-iotest and tsvz-rs, "Run it on all three (Recommended)", 2026-11-14.
 
 ### Standing rows
 - **Deferred work** is in `docs/limitations.md` (entries of kind "deferred"); each names when it is revisited. This repo has no `docs/limitations.md` yet, so nothing is deferred.
@@ -30,7 +30,7 @@ The user's rulings on how the cas repos are worked, one line each; a line change
 - macOS (2026-11-11): tests run on the user's own always-on Mac, as a standard user made for them, never with sudo.
 
 ## Questions waiting for the user
-- None.
+- The simplify pass: remove the writev/readv retry through `f.write`/`f.readinto`? It makes the same system call the kernel just refused, so it fails the same way, except that it hides an error that clears within microseconds. Removing it costs the `-v` "trying f.write" line and README line 5's "with fallback to python f.write()". Recommended: remove it. Ask when the work resumes.
 
 ## Closed
 - None.
