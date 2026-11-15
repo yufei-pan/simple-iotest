@@ -194,3 +194,10 @@ options:
                         min' +%s)), so several hosts start together. Clocks must be in sync
   -V, --version         show program's version number and exit
 ```
+
+## Upgrading to 3.71.0 from 3.70.1
+
+- Nothing needs doing. The options, test files, reports, CSV, JSON and timeline are unchanged.
+- Changed: a write or read the OS refuses fails on its first error, with that error's text. 3.70.1 retried it once through Python's `f.write()` / `f.readinto()`, which made the same call again (and printed `Failed to write using os.writev, trying f.write` with `-v`).
+- With `-v`, a simultaneous worker's start and end lines name its mode as the other workers' do, and a late simultaneous worker logs that it started late.
+- For code that imports iotest: `format_bytes()` only formats a number (`parse_size_arg()` parses sizes), and `simultaneous_role_worker()` is gone: `worker(..., simultaneous_run_id=...)` runs a simultaneous writer or reader. `main()` and `run_iotest()` take and return the same as in 3.70.1.
