@@ -44,38 +44,13 @@ __version__ = version
 
 # --------------------------------
 # TeeLogger Inline print only
-class bcolors:
-	HEADER = '\033[95m'
-	OKBLUE = '\033[94m'
-	OKCYAN = '\033[96m'
-	OKGREEN = '\033[92m'
-	warning = '\033[93m'
-	critical = '\033[91m'
-	info = '\033[0m'
-	debug = '\033[0m'
-	ENDC = '\033[0m'
-	BOLD = '\033[1m'
-	UNDERLINE = '\033[4m'
+# the levels iotest prints at; any other prints plain
+LEVEL_COLORS = {'warning': '\033[93m', 'error': '\033[93m', 'critical': '\033[91m'}
+COLOR_END = '\033[0m'
 
 def printWithColor(msg, level = 'info'):
-	if level == 'info':
-		print(msg)
-	elif level == 'debug':
-		print(bcolors.debug + msg + bcolors.ENDC)
-	elif level == 'warning':
-		print(bcolors.warning + msg + bcolors.ENDC)
-	elif level == 'error':
-		print(bcolors.warning + msg + bcolors.ENDC)
-	elif level == 'critical':
-		print(bcolors.critical + msg + bcolors.ENDC)
-	elif level == 'ok' or level == 'okgreen':
-		print(bcolors.OKGREEN + msg + bcolors.ENDC)
-	elif level == 'okblue':
-		print(bcolors.OKBLUE + msg + bcolors.ENDC)
-	elif level == 'okcyan':
-		print(bcolors.OKCYAN + msg + bcolors.ENDC)
-	else:
-		print(bcolors.info + msg + bcolors.ENDC)
+	color = LEVEL_COLORS.get(level)
+	print(color + msg + COLOR_END if color else msg)
 
 def worker_log(msg, level='info', quiet=False):
 	if quiet:
@@ -95,61 +70,26 @@ except Exception:
 	class Tee_Logger:
 		version = '0.1 inline'
 		class teeLogger:
-			def __init__(self, systemLogFileDir='.', programName=None, compressLogAfterMonths=2, 
-				 deleteLogAfterYears=2, suppressPrintout=..., fileDescriptorLength=15,
-				 noLog=False,callerStackDepth=-2,disable_colors=False, encoding = None,
-				 in_place_compression = None, collapse_single_day_logs = ...,compression_level=...,
-				 binary_mode = True):
-				self.name = programName
+			# what iotest calls of tee-logger: it prints, and logs nothing
+			def __init__(self, suppressPrintout=False, noLog=False, **_):
 				self.currentDateTime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-				self.noLog = True
+				self.logFileName = '/dev/null'
+				self.suppressPrintout = suppressPrintout
 				if not noLog:
 					print('Using inline logger, forcing noLog...', file=sys.stderr)
-				self.systemLogFileDir = '/dev/null'
-				self.logsDir = '/dev/null'
-				self.logFileDir = '/dev/null'
-				self.logFileName = '/dev/null'
-				self.compressLogAfterMonths = compressLogAfterMonths
-				self.deleteLogAfterYears = deleteLogAfterYears
-				self.suppressPrintout = suppressPrintout
-				self.fileDescriptorLength = fileDescriptorLength
-				self.version = Tee_Logger.version
-				self.logger = None
-
-			def log_with_caller_info(self, level, msg):
-				return
-
-			def teeok(self, msg):
-				if not self.suppressPrintout:
-					printWithColor(msg, 'okgreen')
-				self.log_with_caller_info('info', msg)
-
-			def ok(self, msg):
-				self.log_with_caller_info('info', msg)
-
-			def teeprint(self, msg):
-				if not self.suppressPrintout:
-					printWithColor(msg, 'info')
-				self.log_with_caller_info('info', msg)
-
-			def info(self, msg):
-				self.log_with_caller_info('info', msg)
-
-			def teeerror(self, msg):
-				if not self.suppressPrintout:
-					printWithColor(msg, 'error')
-				self.log_with_caller_info('error', msg)
-
-			def error(self, msg):
-				self.log_with_caller_info('error', msg)
 
 			def teelog(self, msg, level):
 				if not self.suppressPrintout:
 					printWithColor(msg, level)
-				self.log_with_caller_info(level, msg)
 
-			def log(self, msg, level):
-				self.log_with_caller_info(level, msg)
+			def teeprint(self, msg):
+				self.teelog(msg, 'info')
+
+			def teeerror(self, msg):
+				self.teelog(msg, 'error')
+
+			def info(self, msg):
+				pass
 
 # ------------------------------
 def format_bytes(size, use_1024_bytes=None, to_int=False, to_str=False,str_format='.2f'):
@@ -881,7 +821,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				local_timeline.add('stat', file_index, attempt, stat_result)
 			size = stat_result[2]
 			if size != file_size:
-				worker_log(f'{bcolors.critical}File {file_name} size is wrong, expected {file_size}, got {size}\033[0m', level='error', quiet=quiet)
+				worker_log(f"{LEVEL_COLORS['critical']}File {file_name} size is wrong, expected {file_size}, got {size}{COLOR_END}", level='error', quiet=quiet)
 			resultList.append(op_time(stat_result))
 			attempt = time.perf_counter() if local_timeline is not None else None
 			op_result = read_file(moved_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
@@ -2702,7 +2642,6 @@ def climain():
 		args.no_report = True
 	if args.no_log:
 		args.log_directory = '/dev/null'
-	#tl = Tee_Logger.teeLogger(args.log_directory,'iotest',2,10)
 	tl = Tee_Logger.teeLogger(systemLogFileDir=args.log_directory,programName='iotest',compressLogAfterMonths=1,deleteLogAfterYears=3,suppressPrintout=args.stealth,noLog=args.no_log,in_place_compression=True)
 	tl.info(f'Arguments: {vars(args)}')
 	file_size_specified = args.file_size is not None

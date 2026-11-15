@@ -249,33 +249,19 @@ def test_parse_size_arg_negative_raises_valueerror(iotest_mod):
 
 
 @pytest.mark.parametrize(
-    "level",
-    ["info", "debug", "warning", "error", "critical", "ok", "okgreen", "okblue", "okcyan", "bogus"],
-)
-def test_print_with_color_emits_message(iotest_mod, capsys, level):
-    iotest_mod.printWithColor("hello-print", level)
-    captured = capsys.readouterr().out
-    assert "hello-print" in captured
-
-
-@pytest.mark.parametrize(
-    "level,marker",
+    "level,expected",
     [
-        ("warning", iotest_module.bcolors.warning),
-        ("error", iotest_module.bcolors.warning),
-        ("critical", iotest_module.bcolors.critical),
-        ("ok", iotest_module.bcolors.OKGREEN),
-        ("okgreen", iotest_module.bcolors.OKGREEN),
-        ("okblue", iotest_module.bcolors.OKBLUE),
-        ("okcyan", iotest_module.bcolors.OKCYAN),
-        ("debug", iotest_module.bcolors.debug),
-        ("bogus", iotest_module.bcolors.info),
+        ("info", "x\n"),
+        ("warning", "\033[93mx\033[0m\n"),
+        ("error", "\033[93mx\033[0m\n"),
+        ("critical", "\033[91mx\033[0m\n"),
+        ("bogus", "x\n"),
     ],
 )
-def test_print_with_color_ansi_markers(iotest_mod, capsys, level, marker):
-    # error uses the warning colour; bogus falls through to the info branch
+def test_print_with_color(iotest_mod, capsys, level, expected):
+    # error uses the warning colour; a level iotest does not use prints plain
     iotest_mod.printWithColor("x", level)
-    assert marker in capsys.readouterr().out
+    assert capsys.readouterr().out == expected
 
 
 def test_worker_log_quiet_suppresses(iotest_mod, capsys):
