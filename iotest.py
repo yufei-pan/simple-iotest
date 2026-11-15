@@ -1973,13 +1973,6 @@ def parse_modes(mode_args):
 			modes.extend(MODE_ALIASES[key])
 	return modes
 
-def _simultaneous_session_kwargs(run_id, skip_layout=True, skip_cleanup=True):
-	return {
-		'simultaneous_run_id': run_id,
-		'simultaneous_skip_layout': skip_layout,
-		'simultaneous_skip_cleanup': skip_cleanup,
-	}
-
 def _run_tuning_main(options, tl, process_count, simultaneous_write_count=None, simultaneous_session=None):
 	kwargs = simultaneous_session or {}
 	# tuning_attempt=True: no report files and no short reports
@@ -2099,7 +2092,8 @@ def tune_simultaneous(options, tl, write_target, read_target):
 		os.makedirs(output_dir, exist_ok=True)
 	run_id = tl.currentDateTime
 	layout_workers = max(max_pc - 1, 1)
-	sim_session = _simultaneous_session_kwargs(run_id)
+	# every run reads the layout written here, once, and leaves the tree for the next
+	sim_session = {'simultaneous_run_id': run_id, 'simultaneous_skip_layout': True, 'simultaneous_skip_cleanup': True}
 	if write_target and read_target:
 		write_count, read_count = estimate_simultaneous_split(pc, write_target, read_target)
 		split_note = (f"estimated {write_count} writers + {read_count} readers from target ratio "
@@ -2122,6 +2116,11 @@ def tune_simultaneous(options, tl, write_target, read_target):
 		else:
 			write_count = new_pc // 2
 			read_count = new_pc - write_count
+	def shift_to_writers(n):
+		# n workers move from reading to writing (n < 0: from writing to reading)
+		nonlocal write_count, read_count
+		write_count += n
+		read_count -= n
 	def finalize_simultaneous_tuning():
 		_finalize_tuning_run(options, tl, pc, write_count, simultaneous_session=sim_session)
 	last_valid = None
@@ -2169,56 +2168,30 @@ def tune_simultaneous(options, tl, write_target, read_target):
 			read_status = throughput_status(read_measured, read_target) if read_target else None
 			tl.teeprint(f"tpt attempt {attempt}: pc={pc} ({write_count}w+{read_count}r) "
 				f"write={format_bytes(write_measured)}B/s read={format_bytes(read_measured)}B/s")
-			if write_target and not read_target:
-				if write_status != 'below':
+			if not (write_target and read_target):
+				# one target: its role gains a worker while below it and gives one up while above it, then pc goes down
+				role = 'write' if write_target else 'read'
+				status, measured, target = (write_status, write_measured, write_target) if write_target else (read_status, read_measured, read_target)
+				role_count, other_count = (write_count, read_count) if write_target else (read_count, write_count)
+				to_role = 1 if write_target else -1
+				if status != 'below':
 					note_valid_config()
-				if write_status == 'below':
-					if accept_last_valid("Cannot reduce write workers without missing write target;"):
+				if status == 'below':
+					if accept_last_valid(f"Cannot reduce {role} workers without missing {role} target;"):
 						return 0
-					if read_count > 1:
-						write_count += 1
-						read_count -= 1
+					if other_count > 1:
+						shift_to_writers(to_role)
 						continue
-					tl.teeerror(f"Cannot meet write target throughput {format_bytes(write_target)}B/s: "
-						f"measured {format_bytes(write_measured)}B/s.")
+					tl.teeerror(f"Cannot meet {role} target throughput {format_bytes(target)}B/s: "
+						f"measured {format_bytes(measured)}B/s.")
 					sys.exit(1)
-				if write_status == 'ok':
-					tl.teeprint(f"Write target reached: {write_count} writers + {read_count} readers, "
-						f"measured={format_bytes(write_measured)}B/s")
+				if status == 'ok':
+					tl.teeprint(f"{role.capitalize()} target reached: {write_count} writers + {read_count} readers, "
+						f"measured={format_bytes(measured)}B/s")
 					finalize_simultaneous_tuning()
 					return 0
-				if write_count > 1:
-					write_count -= 1
-					read_count += 1
-					continue
-				if pc > 2:
-					pc -= 1
-					reset_split_for_pc(pc)
-					continue
-				tl.teeprint("At minimum simultaneous configuration; accepting as best effort.")
-				finalize_simultaneous_tuning()
-				return 0
-			if read_target and not write_target:
-				if read_status != 'below':
-					note_valid_config()
-				if read_status == 'below':
-					if accept_last_valid("Cannot reduce read workers without missing read target;"):
-						return 0
-					if write_count > 1:
-						write_count -= 1
-						read_count += 1
-						continue
-					tl.teeerror(f"Cannot meet read target throughput {format_bytes(read_target)}B/s: "
-						f"measured {format_bytes(read_measured)}B/s.")
-					sys.exit(1)
-				if read_status == 'ok':
-					tl.teeprint(f"Read target reached: {write_count} writers + {read_count} readers, "
-						f"measured={format_bytes(read_measured)}B/s")
-					finalize_simultaneous_tuning()
-					return 0
-				if read_count > 1:
-					write_count += 1
-					read_count -= 1
+				if role_count > 1:
+					shift_to_writers(-to_role)
 					continue
 				if pc > 2:
 					pc -= 1
@@ -2240,12 +2213,10 @@ def tune_simultaneous(options, tl, write_target, read_target):
 				if accept_last_valid("Cannot adjust worker ratio without missing a target;"):
 					return 0
 				if write_status == 'below' and read_count > 1:
-					write_count += 1
-					read_count -= 1
+					shift_to_writers(1)
 					continue
 				if read_status == 'below' and write_count > 1:
-					write_count -= 1
-					read_count += 1
+					shift_to_writers(-1)
 					continue
 				tl.teeerror("Cannot balance simultaneous write/read ratio to meet both targets.")
 				sys.exit(1)
@@ -2262,12 +2233,10 @@ def tune_simultaneous(options, tl, write_target, read_target):
 				write_ratio = write_measured / write_target
 				read_ratio = read_measured / read_target
 				if write_ratio > read_ratio and write_count > 1:
-					write_count -= 1
-					read_count += 1
+					shift_to_writers(-1)
 					continue
 				if read_ratio > write_ratio and read_count > 1:
-					write_count += 1
-					read_count -= 1
+					shift_to_writers(1)
 					continue
 				if pc > 2:
 					pc -= 1
@@ -2278,8 +2247,7 @@ def tune_simultaneous(options, tl, write_target, read_target):
 				return 0
 			if write_status == 'above' and read_status == 'ok':
 				if write_count > 1:
-					write_count -= 1
-					read_count += 1
+					shift_to_writers(-1)
 					continue
 				if pc > 2:
 					pc -= 1
@@ -2289,8 +2257,7 @@ def tune_simultaneous(options, tl, write_target, read_target):
 				return 0
 			if read_status == 'above' and write_status == 'ok':
 				if read_count > 1:
-					write_count += 1
-					read_count -= 1
+					shift_to_writers(1)
 					continue
 				if pc > 2:
 					pc -= 1
