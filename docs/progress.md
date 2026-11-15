@@ -8,7 +8,7 @@ Open work lives here and nowhere else (RULES, "Long work: the progress file"). E
 ## Open work
 
 ### Release riders (no written plan; the user's pick is quoted in the row)
-- **Building; resumed 2026-11-15 (chief's order, after the user's "Resume both (Recommended)"; paused 2026-11-14 at the user's ask):** branch feat/simplify (worktree iotest-simplify) at d1f03ef, 12 commits on a771fcf: the simplify pass (iotest.py 2,790 to 2,470 lines, behaviour unchanged), Python 3.11 in CI (10a8ffd), and a WIP commit for version 3.71.0. Left: the full suites on d1f03ef (3.14, 3.11, numpy, 3.6), the real benchmark before and after, a docs/limitations.md with one deferred entry (`iotest -pc 1 simultaneous` crashes with a traceback, as in 3.70.1), the release-notes draft. One question for the user waits (below).
+- **Built; under final review (2026-11-15):** branch feat/simplify (worktree iotest-simplify) at b0cdb81, 15 commits on a771fcf: the simplify pass (iotest.py 2,790 to 2,457 lines), Python 3.11 in CI (10a8ffd), the os.writev/os.readv retry removed (dfab87b; a chief's decision of 2026-11-15, not the user's words), version 3.71.0 (0404790), docs/limitations.md with the `-pc 1 simultaneous` deferral (b0cdb81). Suites pass on 3.14, 3.11, numpy and 3.6 (first runs); a real benchmark against 3.70.1 gives the same report lines and keys, figures in range (paused 2026-11-14 at the user's ask; resumed on chief's order after the user's "Resume both (Recommended)"). Next: the final review and second opinions (running), then the release (COMMIT_DATE at the release commit).
 - **Add Python 3.11 to the GitHub CI matrix.** State: built (10a8ffd), rides 3.71.0. Where: `.github/workflows/test.yml`, the first job's matrix `["3.9", "3.12", "3.14"]` on master ab2623b; add `"3.11"` in the commit of the repo's next release push. No next release is queued (the 3.70.1 release notes say "Nothing queued"), so this rides whichever release comes next. The other jobs (numpy on 3.12, the Python 3.6 container, lint, macOS and Windows on 3.12) stay as they are. From: the user, 2026-11-12: "Add 3.11 to CI (Recommended)", for every repo's next release.
 
 ### The simplify pass (no written plan)
@@ -30,7 +30,7 @@ The user's rulings on how the cas repos are worked, one line each; a line change
 - macOS (2026-11-11): tests run on the user's own always-on Mac, as a standard user made for them, never with sudo.
 
 ## Questions waiting for the user
-- None. Decided 2026-11-15, a chief's decision (not the user's words): remove the os.writev/os.readv retry through f.write/f.readinto; the release notes say that a write or read now fails on its first error.
+- None. Decided 2026-11-15, a chief's decision (not the user's words): remove the os.writev/os.readv retry through f.write/f.readinto; the release notes say that a write or read now fails on its first error (built in dfab87b).
 
 ## Closed
 - None.
