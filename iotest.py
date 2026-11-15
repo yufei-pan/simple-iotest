@@ -955,9 +955,7 @@ def layout_read_worker(file_count, file_size, base_directory, run_id, counter, q
 def cleanup_simultaneous_tree(directories, run_id):
 	# the run's tree in each directory that has one
 	for base in directories:
-		simul_root = os.path.join(base, f".iotest_simul_{run_id}")
-		if os.path.isdir(simul_root):
-			shutil.rmtree(simul_root, ignore_errors=True)
+		shutil.rmtree(os.path.join(base, f".iotest_simul_{run_id}"), ignore_errors=True)
 
 def run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
 		quiet, zeros, tl, unique=False, block_size=None, verify=False, manager=None):
@@ -1632,11 +1630,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	estimatedTotalMemory = sum(worker_memory)
 	if modes == ['benchmark']:
 		file_count = 0
-	try:
-		phyFreeMemory, swapMemory = read_meminfo()
-	except Exception:
-		phyFreeMemory, swapMemory = -1, -1
-		tl.teeerror("Failed to read /proc/meminfo")
+	phyFreeMemory, swapMemory = read_meminfo()
 	# warn if the estimated total memory is more than 90% of the total free memory
 	if phyFreeMemory + swapMemory > 0 and estimatedTotalMemory > phyFreeMemory + swapMemory:
 		tl.teeerror("Estimated total memory usage is more than the all available memory to use.")
@@ -2414,23 +2408,15 @@ def climain():
 		if file_size_specified and file_count_specified and process_count_specified:
 			tl.teelog("Warning | iotest: -ts/--total_size is ignored because -fs, -fc, and -pc/-t are all explicitly set.", level='warning')
 		else:
+			# -fs, -fc, -pc and -ts are each at least 1
 			if not file_count_specified:
-				denominator = args.file_size * args.process_count
-				if denominator <= 0:
-					raise ValueError("Cannot calculate file_count because file_size * process_count is invalid")
-				args.file_count = max(total_size // denominator, 1)
+				args.file_count = max(total_size // (args.file_size * args.process_count), 1)
 				tl.teelog(f"Adjusted -fc to {args.file_count} to fit total_size {format_bytes(total_size)}B", level='info')
 			elif not file_size_specified:
-				denominator = args.file_count * args.process_count
-				if denominator <= 0:
-					raise ValueError("Cannot calculate file_size because file_count * process_count is invalid")
-				args.file_size = max(total_size // denominator, 1)
+				args.file_size = max(total_size // (args.file_count * args.process_count), 1)
 				tl.teelog(f"Adjusted -fs to {format_bytes(args.file_size)}B to fit total_size {format_bytes(total_size)}B", level='info')
 			elif not process_count_specified:
-				denominator = args.file_size * args.file_count
-				if denominator <= 0:
-					raise ValueError("Cannot calculate process_count because file_size * file_count is invalid")
-				args.process_count = max(total_size // denominator, 1)
+				args.process_count = max(total_size // (args.file_size * args.file_count), 1)
 				tl.teelog(f"Adjusted -t/-pc to {args.process_count} to fit total_size {format_bytes(total_size)}B", level='info')
 	# after -ts, which can set the file size
 	if args.verify and args.file_size < 28:
