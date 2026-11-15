@@ -15,15 +15,13 @@ def test_version_string(iotest_mod):
     assert iotest_mod.version == iotest_mod.__version__
 
 
-def test_format_bytes_round_trip_1024(iotest_mod):
-    n = iotest_mod.format_bytes("1.5 GiB", to_int=True)
-    assert n == 1610612736
-    s = iotest_mod.format_bytes(n, use_1024_bytes=True, to_str=True)
-    assert "Gi" in s
-
-
-def test_format_bytes_invalid_returns_zero(iotest_mod):
-    assert iotest_mod.format_bytes("not-a-size", to_int=True) == 0
+@pytest.mark.parametrize(
+    "size,use_1024_bytes,expected",
+    [(0, True, "0.00 "), (1023, True, "1023.00 "), (1536, True, "1.50 Ki"), (1610612736, True, "1.50 Gi"),
+     (1500, False, "1.50 K"), (1610612736, False, "1.61 G"), (2.5 * 2 ** 50, True, "2.50 Pi")],
+)
+def test_format_bytes(iotest_mod, size, use_1024_bytes, expected):
+    assert iotest_mod.format_bytes(size, use_1024_bytes=use_1024_bytes) == expected
 
 
 @pytest.mark.parametrize(
