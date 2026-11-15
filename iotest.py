@@ -1678,9 +1678,6 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				gen_benchmark_workers = process_count // 2
 		else:
 			gen_benchmark_workers = process_count
-		effective_benchmark_time = options.benchmark_time
-		if is_simultaneous and tuning_attempt:
-			effective_benchmark_time = SIMULTANEOUS_TUNING_BENCHMARK_TIME
 		# measured before the generation benchmark's processes compete for memory bandwidth
 		alloc_workers = read_buffer_workers(modes, process_count, simultaneous_write_count)
 		alloc_time = read_buffer_alloc_time(read_size, alloc_workers, measure_alloc_speed(read_size)) if alloc_workers else 0.0
@@ -1705,9 +1702,9 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				generator = 'random.getrandbits'
 			# workers generate only the buffer they hold
 			buffer_kind = 'chunk pools' if block_size else 'files'
-			tl.teeprint(f"Benchmarking file generation performance... using {gen_benchmark_workers}x {generator} with {format_bytes(buffer_size)}B {buffer_kind} * {file_count if file_count else '∞'} for {effective_benchmark_time}s")
+			tl.teeprint(f"Benchmarking file generation performance... using {gen_benchmark_workers}x {generator} with {format_bytes(buffer_size)}B {buffer_kind} * {file_count if file_count else '∞'} for {options.benchmark_time}s")
 			for counter in range(gen_benchmark_workers):
-				p = Process(target=benchmarkGenSpeed, args=(buffer_size, file_count,zeros,results,effective_benchmark_time))
+				p = Process(target=benchmarkGenSpeed, args=(buffer_size, file_count,zeros,results,options.benchmark_time))
 				processes.append(p)
 			genStartTime = time.perf_counter()
 			start_processes(processes)
@@ -2078,6 +2075,7 @@ def estimate_simultaneous_split(process_count, write_target, read_target):
 	return write_count, read_count
 
 def tune_simultaneous(options, tl, write_target, read_target):
+	# its attempts, and its final run, benchmark generation for this long
 	options = options.replace(benchmark_time=SIMULTANEOUS_TUNING_BENCHMARK_TIME)
 	max_pc = options.process_count
 	pc = options.process_count
