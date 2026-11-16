@@ -65,7 +65,7 @@ Default mode is **write** (`w`) when no mode is specified.
 - `random`: Random read/write steps. Reads and writes are reported separately, as `random_write` and `random_read` (and as separate CSV columns); both use the whole pass's wall time for the sync figures.  
 - `comprehensive` / `c`: write → move → stat → read per file. Each section ends with a note that its sync figures are estimates: the pass time is split across write/move/stat/read by their share of op time.  
 - `rw` / `wr`: Run write, then read sequentially in batch mode.  
-- `simultaneous` / `s`: Pre-writes read targets, then runs half the workers writing and half reading concurrently on separate files. Removes all temp files when done. It needs at least 2 processes: with one, iotest ends in a traceback and exits 1 (to become an invalid-argument exit 2). If this layout pass cannot write every read file, the timed pass is skipped, the failures are reported under the result key `layout` (`Failed layout ops: <failed> of <read files>`, an empty `layout_time` column in the CSV), and iotest exits 1.  
+- `simultaneous` / `s`: Pre-writes read targets, then runs half the workers writing and half reading concurrently on separate files. Removes all temp files when done. It needs at least 2 processes: with one, iotest ends in a traceback and exits 1. If this layout pass cannot write every read file, the timed pass is skipped, the failures are reported under the result key `layout` (`Failed layout ops: <failed> of <read files>`, an empty `layout_time` column in the CSV), and iotest exits 1.  
 - `rwi` / `wri`: Run write, then read, then index sequentially in batch mode.
 
 Example:
