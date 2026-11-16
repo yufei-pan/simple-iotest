@@ -112,7 +112,7 @@ def spy_worker_sinks(iotest_mod, monkeypatch):
 
     def spy(*args, **kwargs):
         target = kwargs["target"]
-        if target in (iotest_mod.worker, iotest_mod.simultaneous_role_worker):
+        if target is iotest_mod.worker:
             bound = inspect.signature(target).bind(*kwargs["args"])
             sinks.append((target.__name__, bound.arguments.get("timeline")))
         return real(*args, **kwargs)
@@ -125,7 +125,6 @@ def spy_worker_sinks(iotest_mod, monkeypatch):
 def test_workers_get_a_timeline_sink_only_with_timeline(run_main, iotest_mod, monkeypatch, rec_tl, timeline):
     sinks = spy_worker_sinks(iotest_mod, monkeypatch)
     run_main(["write", "simultaneous", "meta"], process_count=2, tl=rec_tl, no_report=False, timeline=timeline)
-    assert {name for name, _ in sinks} == {"worker", "simultaneous_role_worker"}
     # write 2 + simultaneous 1 + 1 + meta 3 x 2
     assert len(sinks) == 10
     assert all((sink is not None) == timeline for _, sink in sinks)
@@ -149,17 +148,16 @@ def test_worker_without_a_sink_records_nothing(iotest_mod, work_dir, monkeypatch
     monkeypatch.setattr(iotest_mod, "OpTimeline", no_timeline)
     results = []
     iotest_mod.worker(2, 1024, str(work_dir), results, "write", "0", True, True, 0)
-    iotest_mod.simultaneous_role_worker("write", 2, 1024, str(work_dir), "t", "0", results, True, True, 0)
+    iotest_mod.worker(2, 1024, str(work_dir), results, "write", "0", True, True, 0, simultaneous_run_id="t")
     # one results record each
     assert len(results) == 2
     assert len(list(iotest_mod.result_samples(results))) == 4
 
 
 def unpack(record):
-    counter, index_type, ops, file_indexes, starts, durations, errors = record
+    counter, ops, file_indexes, starts, durations, errors = record
     # the arrays' bytes: 1 + 4 + 8 + 8 bytes an op
     assert [type(b) for b in (ops, file_indexes, starts, durations)] == [bytes] * 4
-    assert index_type == "I"
     return (counter, list(ops), list(array.array("I", file_indexes)), list(array.array("d", starts)),
             list(array.array("d", durations)), errors)
 
@@ -177,7 +175,7 @@ def test_worker_hands_over_one_compact_record(iotest_mod, work_dir):
 
 
 def test_op_timeline_keeps_failed_ops_apart(iotest_mod):
-    timeline = iotest_mod.OpTimeline("3", 10.0, 2)
+    timeline = iotest_mod.OpTimeline("3", 10.0)
     timeline.add("read", 1, 10.0, (10.5, 10.75))
     timeline.add("read", 2, 11.0, (None, "OSError: boom"))
     counter, ops, file_indexes, starts, durations, errors = unpack(timeline.record())
@@ -187,30 +185,22 @@ def test_op_timeline_keeps_failed_ops_apart(iotest_mod):
     assert errors == {1: "OSError: boom"}
 
 
-def test_op_timeline_takes_file_indexes_past_32_bits(iotest_mod):
-    timeline = iotest_mod.OpTimeline("0", 0.0, 2 ** 32)
-    timeline.add("index", 2 ** 32, 0.0, (0.5, 0.75))
-    out = io.StringIO()
-    iotest_mod.write_timeline([(1, "index", [timeline.record()])])(out)
-    assert out.getvalue().splitlines()[1] == "1,index,index,0,4294967296,0.500000,0.250000,"
-
-
 def synthetic_passes(iotest_mod):
     # pass 1: worker 1's record arrived first. It has a failed op at 0.75, the same start as
     # worker 0's second op, so that tie keeps worker 1's row first, as the old stable sort did
-    w1 = iotest_mod.OpTimeline("1", 10.0, 3)
+    w1 = iotest_mod.OpTimeline("1", 10.0)
     w1.add("write", 1, 10.0, (10.5, 10.75))
     w1.add("write", 2, 10.75, (None, "OSError: [Errno 28] No space left on device, 'x'"))
     w1.add("write", 3, 11.0, (11.0, 11.5))
-    w0 = iotest_mod.OpTimeline("0", 10.0, 3)
+    w0 = iotest_mod.OpTimeline("0", 10.0)
     w0.add("write", 1, 10.0, (10.125, 10.625))
     w0.add("write", 2, 10.625, (10.75, 11.0))
     # pass 2: meta ops, a worker with no ops at all, and a tie at 0.0 between two workers
-    m0 = iotest_mod.OpTimeline("0", 20.0, 2)
+    m0 = iotest_mod.OpTimeline("0", 20.0)
     m0.add("create", 1, 20.0, (20.0, 20.0625))
     m0.add("create", 2, 20.0625, (20.0625, 20.125))
-    empty = iotest_mod.OpTimeline("2", 20.0, 2)
-    m1 = iotest_mod.OpTimeline("1", 20.0, 2)
+    empty = iotest_mod.OpTimeline("2", 20.0)
+    m1 = iotest_mod.OpTimeline("1", 20.0)
     m1.add("create", 1, 20.0, (20.0, 20.5))
     return [(1, "write", [w1.record(), w0.record()]), (2, "meta", [m0.record(), empty.record(), m1.record()])]
 
@@ -266,8 +256,8 @@ def test_a_failed_timeline_hand_over_comes_before_the_results(iotest_mod, work_d
             iotest_mod.worker(3, 1024, str(work_dir), results, "write", "0000", True, True, 0, timeline=FailingSink())
         else:
             iotest_mod.layout_read_worker(3, 1024, str(work_dir), "t", "0000", True, True)
-            iotest_mod.simultaneous_role_worker(role, 3, 1024, str(work_dir), "t", "0000", results, True, True, 0,
-                timeline=FailingSink())
+            iotest_mod.worker(3, 1024, str(work_dir), results, role, "0000", True, True, 0, timeline=FailingSink(),
+                simultaneous_run_id="t")
     assert results == []
 
 

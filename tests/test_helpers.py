@@ -15,15 +15,13 @@ def test_version_string(iotest_mod):
     assert iotest_mod.version == iotest_mod.__version__
 
 
-def test_format_bytes_round_trip_1024(iotest_mod):
-    n = iotest_mod.format_bytes("1.5 GiB", to_int=True)
-    assert n == 1610612736
-    s = iotest_mod.format_bytes(n, use_1024_bytes=True, to_str=True)
-    assert "Gi" in s
-
-
-def test_format_bytes_invalid_returns_zero(iotest_mod):
-    assert iotest_mod.format_bytes("not-a-size", to_int=True) == 0
+@pytest.mark.parametrize(
+    "size,use_1024_bytes,expected",
+    [(0, True, "0.00 "), (1023, True, "1023.00 "), (1536, True, "1.50 Ki"), (1610612736, True, "1.50 Gi"),
+     (1500, False, "1.50 K"), (1610612736, False, "1.61 G"), (2.5 * 2 ** 50, True, "2.50 Pi")],
+)
+def test_format_bytes(iotest_mod, size, use_1024_bytes, expected):
+    assert iotest_mod.format_bytes(size, use_1024_bytes=use_1024_bytes) == expected
 
 
 @pytest.mark.parametrize(
@@ -249,33 +247,19 @@ def test_parse_size_arg_negative_raises_valueerror(iotest_mod):
 
 
 @pytest.mark.parametrize(
-    "level",
-    ["info", "debug", "warning", "error", "critical", "ok", "okgreen", "okblue", "okcyan", "bogus"],
-)
-def test_print_with_color_emits_message(iotest_mod, capsys, level):
-    iotest_mod.printWithColor("hello-print", level)
-    captured = capsys.readouterr().out
-    assert "hello-print" in captured
-
-
-@pytest.mark.parametrize(
-    "level,marker",
+    "level,expected",
     [
-        ("warning", iotest_module.bcolors.warning),
-        ("error", iotest_module.bcolors.warning),
-        ("critical", iotest_module.bcolors.critical),
-        ("ok", iotest_module.bcolors.OKGREEN),
-        ("okgreen", iotest_module.bcolors.OKGREEN),
-        ("okblue", iotest_module.bcolors.OKBLUE),
-        ("okcyan", iotest_module.bcolors.OKCYAN),
-        ("debug", iotest_module.bcolors.debug),
-        ("bogus", iotest_module.bcolors.info),
+        ("info", "x\n"),
+        ("warning", "\033[93mx\033[0m\n"),
+        ("error", "\033[93mx\033[0m\n"),
+        ("critical", "\033[91mx\033[0m\n"),
+        ("bogus", "x\n"),
     ],
 )
-def test_print_with_color_ansi_markers(iotest_mod, capsys, level, marker):
-    # error uses the warning colour; bogus falls through to the info branch
+def test_print_with_color(iotest_mod, capsys, level, expected):
+    # error uses the warning colour; a level iotest does not use prints plain
     iotest_mod.printWithColor("x", level)
-    assert marker in capsys.readouterr().out
+    assert capsys.readouterr().out == expected
 
 
 def test_worker_log_quiet_suppresses(iotest_mod, capsys):

@@ -7,15 +7,13 @@ Open work lives here and nowhere else (RULES, "Long work: the progress file"). E
 
 ## Open work
 
-### Release riders (no written plan; the user's pick is quoted in the row)
-- **Built; under final review (2026-11-15):** branch feat/simplify (worktree iotest-simplify) at b0cdb81, 15 commits on a771fcf: the simplify pass (iotest.py 2,790 to 2,457 lines), Python 3.11 in CI (10a8ffd), the os.writev/os.readv retry removed (dfab87b; a chief's decision of 2026-11-15, not the user's words), version 3.71.0 (0404790), docs/limitations.md with the `-pc 1 simultaneous` deferral (b0cdb81). Suites pass on 3.14, 3.11, numpy and 3.6 (first runs); a real benchmark against 3.70.1 gives the same report lines and keys, figures in range (paused 2026-11-14 at the user's ask; resumed on chief's order after the user's "Resume both (Recommended)"). Final review (2026-11-16): release once the docs are corrected; nothing worse than 3.70.1 (27 behaviour cases, speed within 1.4%, the tuner identical on 20,000 scenarios). Fix round 1 (docs and tests only, running): README's -v, memory and -bs sentences, the deferred entry's wording and its README line, four tests. Next: a re-review of the round, then the release (COMMIT_DATE at the release commit). Deferred to the next version: tests for stat_file's failure tuple, comprehensive's wall-time split and the -v verb (also untested in 3.70.1).
-- **Add Python 3.11 to the GitHub CI matrix.** State: built (10a8ffd), rides 3.71.0. Where: `.github/workflows/test.yml`, the first job's matrix `["3.9", "3.12", "3.14"]` on master ab2623b; add `"3.11"` in the commit of the repo's next release push. No next release is queued (the 3.70.1 release notes say "Nothing queued"), so this rides whichever release comes next. The other jobs (numpy on 3.12, the Python 3.6 container, lint, macOS and Windows on 3.12) stay as they are. From: the user, 2026-11-12: "Add 3.11 to CI (Recommended)", for every repo's next release.
-
-### The simplify pass (no written plan)
-- **Simplify and drop dead weight, as the other cas tools had.** State: building on feat/simplify (row above). Where: remove what no operator needs (dead code, guards for states that cannot happen, extra layers), behaviour unchanged, reviewed like a release. From: the user, 2026-10-23: "maybe we should go through the repos after this round, then simplify and drop any stuff that are dead weight?"; for firewatcher, simple-iotest and tsvz-rs, "Run it on all three (Recommended)", 2026-11-14.
+### simple-iotest 3.72.0 (no written plan; from the 3.71.0 reviews)
+- **`-pc 1 simultaneous`: an argument error (exit 2) instead of a traceback.** State: not started. The deferred entry in docs/limitations.md has the plan: parser.error after `-ts` when simultaneous and the process count is below 2; the memory cut keeps 2 processes for simultaneous. From: the 3.70.1 survey (a deferral, not asked).
+- **Tests the 3.71.0 reviews found missing (also untested in 3.70.1).** State: not started. stat_file's failure tuple; comprehensive's wall-time split; the `-v` verb `Wrote`; the simultaneous `-v` lines ("in write mode", "finished", the late-start line). From: the 3.71.0 final review and second opinions.
+- **The "continue anyway in 15 seconds" message sleeps 16 s.** State: not started; pick one number at the source (the message and the sleep), then the README. Also in 3.70.1. From: the 3.71.0 second opinions.
 
 ### Standing rows
-- **Deferred work** is in `docs/limitations.md` (entries of kind "deferred"); each names when it is revisited. This repo has no `docs/limitations.md` yet, so nothing is deferred.
+- **Deferred work** is in `docs/limitations.md` (entries of kind "deferred"); each names when it is revisited. One entry today: `-pc 1 simultaneous` (3.72.0, the row above).
 
 ## Standing decisions
 The user's rulings on how the cas repos are worked, one line each; a line changes only on the user's word. The cas monorepo's CLAUDE.md holds the same list, with how to reach the test machines.
@@ -33,4 +31,5 @@ The user's rulings on how the cas repos are worked, one line each; a line change
 - None. Decided 2026-11-15, a chief's decision (not the user's words): remove the os.writev/os.readv retry through f.write/f.readinto; the release notes say that a write or read now fails on its first error (built in dfab87b).
 
 ## Closed
+- 3.71.0 (tag v3.71.0, the merge of feat/simplify, released 2026-11-16): the simplify pass (iotest.py 2,790 to 2,457 lines; the user, 2026-10-23, and "Run it on all three (Recommended)", 2026-11-14), behaviour unchanged apart from the os.writev/os.readv retry, removed (a chief's decision of 2026-11-15: a refused write or read fails on its first error); Python 3.11 in CI ("Add 3.11 to CI (Recommended)", 2026-11-12); a README trim; docs/limitations.md with the `-pc 1 simultaneous` deferral. Final review release after docs; fix round 1 docs and tests (a23910f, 5bcb224); re-review release; texts f90e6c8, 70fc1dd.
 - None.

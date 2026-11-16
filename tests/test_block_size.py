@@ -392,8 +392,8 @@ def test_simultaneous_and_layout_workers_hold_a_chunk_pool_or_a_block_sized_read
         block_size=64 * KiB)]
     for role in ("write", "read"):
         results = []
-        peaks.append(traced_peak(iotest_mod.simultaneous_role_worker, role, 2, 8 * MiB, str(work_dir), "t", "0",
-            results, True, False, 0, block_size=64 * KiB))
+        peaks.append(traced_peak(iotest_mod.worker, 2, 8 * MiB, str(work_dir), results, role, "0", True, False, 0,
+            block_size=64 * KiB, simultaneous_run_id="t"))
         samples = worker_samples(iotest_mod, results)
         assert len(samples) == 2 and not [s for s in samples if isinstance(s, str)]
     # the layout worker and the writer hold a chunk pool (see above), the reader a block

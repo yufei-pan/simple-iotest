@@ -114,6 +114,18 @@ def test_a_failed_layout_counts_even_when_a_later_one_succeeds(iotest_mod, run_m
     assert iotest_mod.total_failed_ops(result) == 2
 
 
+def test_a_failed_layout_has_no_total_time(iotest_mod, run_main, work_dir, rec_tl):
+    # layout writes are not timed, so the layout key stays out of totalTime; the passes that did run keep theirs
+    block_layout(iotest_mod, work_dir, "lf", range(2))
+    result = run_main(["simultaneous", "simultaneous"], process_count=2, tl=rec_tl, simultaneous_run_id="lf")
+    assert set(result["outResults"]) == {"layout", "write", "read"}
+    assert set(result["totalTime"]) == {"write", "read"}
+    block_layout(iotest_mod, work_dir, "lg", range(2))
+    result = run_main(["simultaneous"], process_count=2, tl=rec_tl, simultaneous_run_id="lg")
+    assert result["outResults"] == {"layout": []}
+    assert result["totalTime"] == {}
+
+
 def test_failed_layouts_of_several_passes_accumulate(iotest_mod, run_main, work_dir, rec_tl):
     block_layout(iotest_mod, work_dir, "lf", range(2))
     result = run_main(["simultaneous", "simultaneous"], process_count=2, tl=rec_tl, simultaneous_run_id="lf",

@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 import time
+import traceback
 import urllib.parse
 import urllib.request
 import zlib
@@ -38,44 +39,19 @@ try:
 except ImportError:
 	numpy_available = False
 
-version = '3.70.1'
-COMMIT_DATE = '2026-11-08'
+version = '3.71.0'
+COMMIT_DATE = '2026-11-16'
 __version__ = version
 
 # --------------------------------
 # TeeLogger Inline print only
-class bcolors:
-	HEADER = '\033[95m'
-	OKBLUE = '\033[94m'
-	OKCYAN = '\033[96m'
-	OKGREEN = '\033[92m'
-	warning = '\033[93m'
-	critical = '\033[91m'
-	info = '\033[0m'
-	debug = '\033[0m'
-	ENDC = '\033[0m'
-	BOLD = '\033[1m'
-	UNDERLINE = '\033[4m'
+# the levels iotest prints at; any other prints plain
+LEVEL_COLORS = {'warning': '\033[93m', 'error': '\033[93m', 'critical': '\033[91m'}
+COLOR_END = '\033[0m'
 
 def printWithColor(msg, level = 'info'):
-	if level == 'info':
-		print(msg)
-	elif level == 'debug':
-		print(bcolors.debug + msg + bcolors.ENDC)
-	elif level == 'warning':
-		print(bcolors.warning + msg + bcolors.ENDC)
-	elif level == 'error':
-		print(bcolors.warning + msg + bcolors.ENDC)
-	elif level == 'critical':
-		print(bcolors.critical + msg + bcolors.ENDC)
-	elif level == 'ok' or level == 'okgreen':
-		print(bcolors.OKGREEN + msg + bcolors.ENDC)
-	elif level == 'okblue':
-		print(bcolors.OKBLUE + msg + bcolors.ENDC)
-	elif level == 'okcyan':
-		print(bcolors.OKCYAN + msg + bcolors.ENDC)
-	else:
-		print(bcolors.info + msg + bcolors.ENDC)
+	color = LEVEL_COLORS.get(level)
+	print(color + msg + COLOR_END if color else msg)
 
 def worker_log(msg, level='info', quiet=False):
 	if quiet:
@@ -95,164 +71,37 @@ except Exception:
 	class Tee_Logger:
 		version = '0.1 inline'
 		class teeLogger:
-			def __init__(self, systemLogFileDir='.', programName=None, compressLogAfterMonths=2, 
-				 deleteLogAfterYears=2, suppressPrintout=..., fileDescriptorLength=15,
-				 noLog=False,callerStackDepth=-2,disable_colors=False, encoding = None,
-				 in_place_compression = None, collapse_single_day_logs = ...,compression_level=...,
-				 binary_mode = True):
-				self.name = programName
+			# what iotest calls of tee-logger: it prints, and logs nothing
+			def __init__(self, suppressPrintout=False, noLog=False, **_):
 				self.currentDateTime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-				self.noLog = True
+				self.logFileName = '/dev/null'
+				self.suppressPrintout = suppressPrintout
 				if not noLog:
 					print('Using inline logger, forcing noLog...', file=sys.stderr)
-				self.systemLogFileDir = '/dev/null'
-				self.logsDir = '/dev/null'
-				self.logFileDir = '/dev/null'
-				self.logFileName = '/dev/null'
-				self.compressLogAfterMonths = compressLogAfterMonths
-				self.deleteLogAfterYears = deleteLogAfterYears
-				self.suppressPrintout = suppressPrintout
-				self.fileDescriptorLength = fileDescriptorLength
-				self.version = Tee_Logger.version
-				self.logger = None
-
-			def log_with_caller_info(self, level, msg):
-				return
-
-			def teeok(self, msg):
-				if not self.suppressPrintout:
-					printWithColor(msg, 'okgreen')
-				self.log_with_caller_info('info', msg)
-
-			def ok(self, msg):
-				self.log_with_caller_info('info', msg)
-
-			def teeprint(self, msg):
-				if not self.suppressPrintout:
-					printWithColor(msg, 'info')
-				self.log_with_caller_info('info', msg)
-
-			def info(self, msg):
-				self.log_with_caller_info('info', msg)
-
-			def teeerror(self, msg):
-				if not self.suppressPrintout:
-					printWithColor(msg, 'error')
-				self.log_with_caller_info('error', msg)
-
-			def error(self, msg):
-				self.log_with_caller_info('error', msg)
 
 			def teelog(self, msg, level):
 				if not self.suppressPrintout:
 					printWithColor(msg, level)
-				self.log_with_caller_info(level, msg)
 
-			def log(self, msg, level):
-				self.log_with_caller_info(level, msg)
+			def teeprint(self, msg):
+				self.teelog(msg, 'info')
+
+			def teeerror(self, msg):
+				self.teelog(msg, 'error')
+
+			def info(self, msg):
+				pass
 
 # ------------------------------
-def format_bytes(size, use_1024_bytes=None, to_int=False, to_str=False,str_format='.2f'):
-	"""
-	Format the size in bytes to a human-readable format or vice versa.
-	From hpcp: https://github.com/yufei-pan/hpcp
-
-	Args:
-		size (int or str): The size in bytes or a string representation of the size.
-		use_1024_bytes (bool, optional): Whether to use 1024 bytes as the base for conversion. If None, it will be determined automatically. Default is None.
-		to_int (bool, optional): Whether to convert the size to an integer. Default is False.
-		to_str (bool, optional): Whether to convert the size to a string representation. Default is False.
-		str_format (str, optional): The format string to use when converting the size to a string. Default is '.2f'.
-
-	Returns:
-		int or str: The formatted size based on the provided arguments.
-
-	Examples:
-		>>> format_bytes(1500, use_1024_bytes=False)
-		'1.50 K'
-		>>> format_bytes('1.5 GiB', to_int=True)
-		1610612736
-		>>> format_bytes('1.5 GiB', to_str=True)
-		'1.50 Gi'
-		>>> format_bytes(1610612736, use_1024_bytes=True, to_str=True)
-		'1.50 Gi'
-		>>> format_bytes(1610612736, use_1024_bytes=False, to_str=True)
-		'1.61 G'
-	"""
-	if to_int or isinstance(size, str):
-		if isinstance(size, int):
-			return size
-		elif isinstance(size, str):
-			# Use regular expression to split the numeric part from the unit, handling optional whitespace
-			match = re.match(r"(\d+(\.\d+)?)\s*([a-zA-Z]*)", size)
-			if not match:
-				if to_str:
-					return size
-				print("Invalid size format. Expected format: 'number [unit]', e.g., '1.5 GiB' or '1.5GiB'")
-				print(f"Got: {size}")
-				return 0
-			number, _, unit = match.groups()
-			number = float(number)
-			unit  = unit.strip().lower().rstrip('b')
-			# Define the unit conversion dictionary
-			if unit.endswith('i'):
-				# this means we treat the unit as 1024 bytes if it ends with 'i'
-				use_1024_bytes = True
-			elif use_1024_bytes is None:
-				use_1024_bytes = False
-			unit  = unit.rstrip('i')
-			if use_1024_bytes:
-				power = 2**10
-			else:
-				power = 10**3
-			unit_labels = {'': 0, 'k': 1, 'm': 2, 'g': 3, 't': 4, 'p': 5}
-			if unit not in unit_labels:
-				if to_str:
-					return size
-				print(f"Invalid unit '{unit}'. Expected one of {list(unit_labels.keys())}")
-				return 0
-			if to_str:
-				return format_bytes(size=int(number * (power ** unit_labels[unit])), use_1024_bytes=use_1024_bytes, to_str=True, str_format=str_format)
-			# Calculate the bytes
-			return int(number * (power ** unit_labels[unit]))
-		else:
-			try:
-				return int(size)
-			except Exception:
-				return 0
-	elif to_str or isinstance(size, int) or isinstance(size, float):
-		if isinstance(size, str):
-			try:
-				size = size.rstrip('B').rstrip('b')
-				size = float(size.lower().strip())
-			except Exception:
-				return size
-		# size is in bytes
-		if use_1024_bytes or use_1024_bytes is None:
-			power = 2**10
-			n = 0
-			power_labels = {0 : '', 1: 'Ki', 2: 'Mi', 3: 'Gi', 4: 'Ti', 5: 'Pi'}
-			while size >= power:
-				size /= power
-				n += 1
-			return f"{size:{str_format}}{' '}{power_labels[n]}"
-		else:
-			power = 10**3
-			n = 0
-			power_labels = {0 : '', 1: 'K', 2: 'M', 3: 'G', 4: 'T', 5: 'P'}
-			while size >= power:
-				size /= power
-				n += 1
-			return f"{size:{str_format}}{' '}{power_labels[n]}"
-	else:
-		try:
-			return format_bytes(float(size), use_1024_bytes)
-		except Exception as e:
-			import traceback
-			print(f"Error: {e}")
-			print(traceback.format_exc())
-			print(f"Invalid size: {size}")
-		return 0
+def format_bytes(size, use_1024_bytes=True):
+	# a byte count for the report: 1536 -> '1.50 Ki', or with use_1024_bytes=False 1500 -> '1.50 K'
+	power = 2**10 if use_1024_bytes else 10**3
+	labels = ('', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi') if use_1024_bytes else ('', 'K', 'M', 'G', 'T', 'P')
+	n = 0
+	while size >= power:
+		size /= power
+		n += 1
+	return f"{size:.2f} {labels[n]}"
 
 GEN_CHUNK = 16 * 2**20
 
@@ -450,6 +299,20 @@ def disable_os_cache(fd):
 	except OSError:
 		pass
 
+def drop_cached_pages(fd, file_size, quiet):
+	try:
+		if os.name == 'posix':
+			os.posix_fadvise(fd, 0, file_size, os.POSIX_FADV_DONTNEED)
+	except (AttributeError, OSError):
+		# AttributeError: macOS is posix but has no posix_fadvise
+		worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
+
+def failed_op(e, quiet):
+	# what a file helper returns when its op fails: (None, the error text), logged with its traceback
+	worker_log(str(e), level='error', quiet=quiet)
+	worker_log(traceback.format_exc(), level='error', quiet=quiet)
+	return None, f'{type(e).__name__}: {e}'
+
 def file_chunks(buffer, file_size, block_size, stamped=False):
 	# (offset in the file, view) for each part of the file one write/read is asked for: the whole file at once,
 	# or with -bs block_size bytes at a time, each from its place in the buffer (chunk_span()). stamped: each
@@ -465,34 +328,21 @@ def file_chunks(buffer, file_size, block_size, stamped=False):
 			yield offset, view[start:start + min(step, file_size - offset)]
 	return chunks()
 
-def write_chunk(f, chunk, offset, file_name, file_size, quiet):
+def write_chunk(f, chunk, offset, file_name, file_size):
+	# a write the OS refuses fails the op on its first error: a retry would make the same call again
 	written = 0
 	while written < len(chunk):
 		part = chunk[written:written + MAX_IO_CHUNK]
-		try:
-			if os.name == 'posix':
-				n = os.writev(f.fileno(), [part])
-			else:
-				n = os.write(f.fileno(), part)
-		except OSError:
-			worker_log('Failed to write using os.writev, trying f.write', level='warning', quiet=quiet)
-			n = f.write(part)
+		n = os.writev(f.fileno(), [part]) if os.name == 'posix' else os.write(f.fileno(), part)
 		if not n:
 			raise OSError(f"{file_name}: write stopped after {offset + written} of {file_size} bytes")
 		written += n
 
-def read_chunk(f, chunk, offset, file_name, file_size, quiet):
+def read_chunk(f, chunk, offset, file_name, file_size):
 	got = 0
 	while got < len(chunk):
 		part = chunk[got:got + MAX_IO_CHUNK]
-		try:
-			if os.name == 'posix':
-				n = os.readv(f.fileno(),[part])
-			else:
-				n = f.readinto(part)
-		except OSError:
-			worker_log('Failed to read using os.readv, trying f.readinto', level='warning', quiet=quiet)
-			n = f.readinto(part)
+		n = os.readv(f.fileno(), [part]) if os.name == 'posix' else f.readinto(part)
 		if not n:
 			raise OSError(f"{file_name}: read hit end of file after {offset + got} of {file_size} bytes")
 		got += n
@@ -510,22 +360,14 @@ def create_file(file_name, file_content, file_size, quiet=False, block_size=None
 					stamp(chunk, offset)
 				if seal is not None:
 					seal(chunk, offset)
-				write_chunk(f, chunk, offset, file_name, file_size, quiet)
+				write_chunk(f, chunk, offset, file_name, file_size)
 			os.fsync(f.fileno())
 			end_write_time = time.perf_counter()
 			# after the sync the pages are clean and can be dropped; before the write the file is empty
-			try:
-				if os.name == 'posix':
-					os.posix_fadvise(f.fileno(), 0, file_size, os.POSIX_FADV_DONTNEED)
-			except (AttributeError, OSError):
-				# AttributeError: macOS is posix but has no posix_fadvise
-				worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
+			drop_cached_pages(f.fileno(), file_size, quiet)
 			return start_write_time,end_write_time
 	except Exception as e:
-		import traceback
-		worker_log(str(e), level='error', quiet=quiet)
-		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return None,f'{type(e).__name__}: {e}'
+		return failed_op(e, quiet)
 
 def move_file(src, dst, quiet=False):
 	start_move_time = time.perf_counter()
@@ -534,10 +376,7 @@ def move_file(src, dst, quiet=False):
 		end_move_time = time.perf_counter()
 		return start_move_time,end_move_time
 	except Exception as e:
-		import traceback
-		worker_log(str(e), level='error', quiet=quiet)
-		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return None,f'{type(e).__name__}: {e}'
+		return failed_op(e, quiet)
 
 def existing_size(path):
 	# one stat: the size of a regular file, 0 for anything else or nothing
@@ -547,15 +386,12 @@ def existing_size(path):
 		return 0
 	return st.st_size if stat.S_ISREG(st.st_mode) else 0
 
-def file_needs_recreate(file_name, file_size):
-	return existing_size(file_name) != file_size
-
 def read_file(file_name, file_size, quiet=False, buffer=None, recreate=None, block_size=None, verify=False):
 	# workers pass one reused buffer; a fresh one costs a zero-fill per read (~150 ms/GiB)
 	b = buffer if buffer is not None else bytearray(block_size or file_size)
 	# check if file exists and size is correct: one stat, inside the timed pass
 	try:
-		if file_needs_recreate(file_name, file_size):
+		if existing_size(file_name) != file_size:
 			if recreate is None:
 				# nothing to write it with: a failed read
 				error = f"{file_name} is missing or not {file_size} bytes"
@@ -572,16 +408,11 @@ def read_file(file_name, file_size, quiet=False, buffer=None, recreate=None, blo
 		trailer = CrcTrailer(file_size) if verify else None
 		with open(file_name, "rb", buffering=0) as f:
 			disable_os_cache(f.fileno())
-			try:
-				if os.name == 'posix':
-					os.posix_fadvise(f.fileno(), 0, file_size, os.POSIX_FADV_DONTNEED)
-			except (AttributeError, OSError):
-				# AttributeError: macOS is posix but has no posix_fadvise
-				worker_log('Failed to posix_fadvise', level='warning', quiet=quiet)
+			drop_cached_pages(f.fileno(), file_size, quiet)
 			chunks = file_chunks(b, file_size, block_size)
 			start_read_time = time.perf_counter()
 			for offset, chunk in chunks:
-				read_chunk(f, chunk, offset, file_name, file_size, quiet)
+				read_chunk(f, chunk, offset, file_name, file_size)
 				if trailer is not None and block_size:
 					# the next chunk reuses the buffer, so the CRC is taken now, inside the timed read
 					trailer.check(chunk, offset)
@@ -596,11 +427,8 @@ def read_file(file_name, file_size, quiet=False, buffer=None, recreate=None, blo
 				return None, mismatch
 		return start_read_time,end_read_time
 	except Exception as e:
-		import traceback
-		worker_log(str(e), level='error', quiet=quiet)
-		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return None,f'{type(e).__name__}: {e}'
-	
+		return failed_op(e, quiet)
+
 
 def index_file(file_name, quiet=False):
 	try:
@@ -615,13 +443,9 @@ def index_file(file_name, quiet=False):
 		os.rmdir(index_folder)
 		end_index_time = time.perf_counter()
 		return start_index_time,end_index_time
-
 	except Exception as e:
-		import traceback
-		worker_log(str(e), level='error', quiet=quiet)
-		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return None,f'{type(e).__name__}: {e}'
-	
+		return failed_op(e, quiet)
+
 def stat_file(file_name, quiet=False):
 	start_stat_time = time.perf_counter()
 	try:
@@ -629,10 +453,7 @@ def stat_file(file_name, quiet=False):
 		end_stat_time = time.perf_counter()
 		return start_stat_time,end_stat_time,size
 	except Exception as e:
-		import traceback
-		worker_log(str(e), level='error', quiet=quiet)
-		worker_log(traceback.format_exc(), level='error', quiet=quiet)
-		return None,f'{type(e).__name__}: {e}',0
+		return failed_op(e, quiet) + (0,)
 
 META_PHASES = ('create', 'stat', 'unlink')
 
@@ -735,11 +556,11 @@ def result_samples(records, kind=None, every=1, offset=0):
 
 class OpTimeline:
 	# one worker's ops of one pass in typed arrays (21 bytes an op), handed to the parent as one record
-	def __init__(self, counter, base, file_count):
+	def __init__(self, counter, base):
 		self.counter = counter
 		self.base = base
 		self.ops = array.array('B')
-		self.file_indexes = array.array('I' if file_count <= 0xFFFFFFFF else 'Q')
+		self.file_indexes = array.array('I')
 		self.starts = array.array('d')
 		self.durations = array.array('d')
 		# position -> error text of the failed ops, whose duration is NaN
@@ -762,7 +583,7 @@ class OpTimeline:
 		# plain bytes, which the manager can hold whatever the start method. Pickle copies an array's data
 		# to bytes and keeps that copy until the whole transfer ends, so as bytes a pass's records take one
 		# copy less in the manager and in the parent
-		return (self.counter, self.file_indexes.typecode, self.ops.tobytes(), self.file_indexes.tobytes(),
+		return (self.counter, self.ops.tobytes(), self.file_indexes.tobytes(),
 			self.starts.tobytes(), self.durations.tobytes(), self.errors)
 
 def worker_color_log(color, msg, quiet=False):
@@ -778,12 +599,17 @@ def wait_for_barrier(start_time):
 	while time.perf_counter() < start_time:
 		time.sleep(0.001)
 
-def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False, late_starts=None, progress_to_stderr=False, timeline=None, block_size=None, verify=False):
-	# the ops append to a list as they go; it becomes one compact record after the last
+# the verbose per-op line's word for each op
+OP_VERBS = {'write': 'Wrote', 'read': 'Read', 'index': 'Indexed', 'create': 'Create', 'stat': 'Stat', 'unlink': 'Unlink'}
+
+def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False, late_starts=None, progress_to_stderr=False, timeline=None, block_size=None, verify=False, simultaneous_run_id=None):
+	# every timed pass's worker; with simultaneous_run_id, a simultaneous pass's writer or reader (mode write or
+	# read) on its own files in that run's tree. The ops append to a list as they go; it becomes one compact
+	# record after the last
 	local_results = []
 	local_kinds = [] if mode == 'random' else None
 	# only with --timeline; without it the loop below does no timeline work beyond a None check
-	local_timeline = OpTimeline(counter, thread_start_time, file_count) if timeline is not None else None
+	local_timeline = OpTimeline(counter, thread_start_time) if timeline is not None else None
 	log = functools.partial(worker_color_log, int_to_color(os.getpid()), quiet=quiet)
 	log(f'Worker {counter} scheduled to start at {thread_start_time-time.perf_counter():.4f} later in {mode} mode.')
 	# read workers create content only if a file must be recreated; index never needs any
@@ -793,11 +619,18 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		content.prepare()
 	read_buffer = bytearray(block_size or file_size) if mode in ('read', 'random', 'comprehensive') else None
 	is_meta = mode.startswith('meta_')
-	if is_meta:
-		meta_dir = meta_dir_path(directory, counter)
+	if simultaneous_run_id is not None:
+		work_dir = simultaneous_worker_dir(directory, simultaneous_run_id, counter)
+		file_path = functools.partial(simultaneous_file_path, work_dir, mode)
+	elif is_meta:
+		work_dir = meta_dir_path(directory, counter)
+		file_path = functools.partial(meta_file_path, directory, counter)
 		if mode == 'meta_create':
-			os.makedirs(meta_dir, exist_ok=True)
-			remove_meta_leftovers(meta_dir)
+			os.makedirs(work_dir, exist_ok=True)
+			remove_meta_leftovers(work_dir)
+	else:
+		work_dir = os.path.join(directory, str(counter))
+		file_path = functools.partial(worker_file_path, directory, counter)
 	if time.perf_counter() > thread_start_time:
 		worker_log(f'Worker {counter} started late, expected start time {thread_start_time}, actual start time {time.perf_counter()}', level='error', quiet=quiet)
 		if late_starts is not None:
@@ -813,57 +646,24 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 		log(f"[Process {pid}]\tFile {str(file_index).zfill(width)}/{file_count}:\t{file_name}\t{text}")
 	# a write, or a read that may recreate its file, writes the file's content; index and meta passes never do
 	writes = mode in ('write', 'read', 'random', 'comprehensive')
+	# simultaneous workers print no progress digits
+	progress = quiet and simultaneous_run_id is None
+	phase = mode[len('meta_'):] if is_meta else None
 	# wait until thread_start_time
 	wait_for_barrier(thread_start_time)
 	if not is_meta:
-		os.makedirs(os.path.join(directory,str(counter)), exist_ok=True)
+		os.makedirs(work_dir, exist_ok=True)
 	reportInterval = max(file_count // 10,1)
 	for i in range(file_count):
 		# print a digit every 10% of the files
-		if i % reportInterval == 0 and quiet:
+		if progress and i % reportInterval == 0:
 				# stderr when stdout carries the JSON summary
 				print(f'\r{i//reportInterval}',end='',flush=True,file=sys.stderr if progress_to_stderr else None)
-		file_name = meta_file_path(directory, counter, i, file_count) if is_meta else worker_file_path(directory, counter, i, file_count)
+		file_name = file_path(i, file_count)
 		write_file = functools.partial(content.write, index=i, quiet=quiet) if writes else None
 		file_index = i + 1
 		attempt = time.perf_counter() if local_timeline is not None else None
-		if mode == 'write':
-			op_result = write_file(file_name)
-			if local_timeline is not None:
-				local_timeline.add('write', file_index, attempt, op_result)
-			write_time = op_time(op_result)
-			local_results.append(write_time)
-			if verbose:
-				log_op(file_index, file_name, f"Wrote\t{format_op(write_time)}")
-		elif mode == 'read':
-			op_result = read_file(file_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
-			if local_timeline is not None:
-				local_timeline.add('read', file_index, attempt, op_result)
-			read_time = op_time(op_result)
-			local_results.append(read_time)
-			if verbose:
-				log_op(file_index, file_name, f"Read\t{format_op(read_time)}")
-		elif mode == 'random':
-			# here we start a random read or write
-			if bool(random.getrandbits(1)):
-				op_result = write_file(file_name)
-				if local_timeline is not None:
-					local_timeline.add('write', file_index, attempt, op_result)
-				write_time = op_time(op_result)
-				local_results.append(write_time)
-				local_kinds.append(OP_CODES['write'])
-				if verbose:
-					log_op(file_index, file_name, f"Wrote\t{format_op(write_time)}")
-			else:
-				op_result = read_file(file_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
-				if local_timeline is not None:
-					local_timeline.add('read', file_index, attempt, op_result)
-				read_time = op_time(op_result)
-				local_results.append(read_time)
-				local_kinds.append(OP_CODES['read'])
-				if verbose:
-					log_op(file_index, file_name, f"Read\t{format_op(read_time)}")
-		elif mode == 'comprehensive':
+		if mode == 'comprehensive':
 			resultList = []
 			moved_name = file_name + ".moved"
 			op_result = write_file(file_name)
@@ -881,7 +681,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 				local_timeline.add('stat', file_index, attempt, stat_result)
 			size = stat_result[2]
 			if size != file_size:
-				worker_log(f'{bcolors.critical}File {file_name} size is wrong, expected {file_size}, got {size}\033[0m', level='error', quiet=quiet)
+				worker_log(f"{LEVEL_COLORS['critical']}File {file_name} size is wrong, expected {file_size}, got {size}{COLOR_END}", level='error', quiet=quiet)
 			resultList.append(op_time(stat_result))
 			attempt = time.perf_counter() if local_timeline is not None else None
 			op_result = read_file(moved_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
@@ -895,26 +695,30 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 			if verbose:
 				log_op(file_index, file_name, f'W: {format_op(resultList[0], ".4f")} M: {format_op(resultList[1], ".4f")} S: {format_op(resultList[2], ".4f")} R: {format_op(resultList[3], ".4f")}')
 			local_results.extend(resultList)
+			continue
+		if mode == 'write' or (mode == 'random' and random.getrandbits(1)):
+			op = 'write'
+			op_result = write_file(file_name)
+		elif mode in ('read', 'random'):
+			op = 'read'
+			op_result = read_file(file_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
 		elif mode == 'index':
 			# This will test the indexing performance of the filesystem
+			op = 'index'
 			op_result = index_file(file_name, quiet)
-			if local_timeline is not None:
-				local_timeline.add('index', file_index, attempt, op_result)
-			index_time = op_time(op_result)
-			local_results.append(index_time)
-			if verbose:
-				log_op(file_index, file_name, f"Indexed\t{format_op(index_time)}")
-		elif is_meta:
-			phase = mode[len('meta_'):]
+		else:
+			op = phase
 			op_result = meta_file(phase, file_name, quiet)
-			if local_timeline is not None:
-				local_timeline.add(phase, file_index, attempt, op_result)
-			meta_time = op_time(op_result)
-			local_results.append(meta_time)
-			if verbose:
-				log_op(file_index, file_name, f"{phase.capitalize()}\t{format_op(meta_time)}")
+		if local_timeline is not None:
+			local_timeline.add(op, file_index, attempt, op_result)
+		op_duration = op_time(op_result)
+		local_results.append(op_duration)
+		if local_kinds is not None:
+			local_kinds.append(OP_CODES[op])
+		if verbose:
+			log_op(file_index, file_name, f"{OP_VERBS[op]}\t{format_op(op_duration)}")
 	if mode == 'meta_unlink':
-		remove_meta_dir(meta_dir)
+		remove_meta_dir(work_dir)
 	log(f'Worker {counter} finished.')
 	if local_timeline is not None:
 		# one record per worker and pass, so the manager sees one append, not one per op. Before the results:
@@ -1116,15 +920,17 @@ def leftover_hint(directories, worker_count, file_count):
 def simultaneous_worker_dir(base_directory, run_id, counter):
 	return os.path.join(base_directory, f".iotest_simul_{run_id}", f"worker_{counter}")
 
+def simultaneous_file_path(worker_dir, role, index, file_count):
+	# a simultaneous writer's files are write_<i>.bin, the layout's and the readers' read_<i>.bin
+	return os.path.join(worker_dir, f"{role}_{str(index + 1).zfill(len(str(file_count)))}.bin")
+
 def layout_read_worker(file_count, file_size, base_directory, run_id, counter, quiet, zeros, unique=False, block_size=None, verify=False, errors=None):
 	content = FileContent(file_size, zeros, unique, new_stamp_id(), block_size, verify)
 	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
 	os.makedirs(worker_dir, exist_ok=True)
 	failures = []
 	for i in range(file_count):
-		i_str = str(i + 1).zfill(len(str(file_count)))
-		file_name = os.path.join(worker_dir, f"read_{i_str}.bin")
-		op_result = content.write(file_name, i, quiet=quiet)
+		op_result = content.write(simultaneous_file_path(worker_dir, 'read', i, file_count), i, quiet=quiet)
 		# a read file that was not laid out would be recreated inside the timed pass, so report it
 		if op_result[0] is None:
 			failures.append(str(op_result[1]))
@@ -1133,58 +939,10 @@ def layout_read_worker(file_count, file_size, base_directory, run_id, counter, q
 	if errors is not None and failures:
 		errors.extend(failures)
 
-def simultaneous_role_worker(role, file_count, file_size, base_directory, run_id, counter, results, quiet, zeros, thread_start_time, unique=False, late_starts=None, timeline=None, block_size=None, verify=False):
-	local_results = []
-	local_timeline = OpTimeline(counter, thread_start_time, file_count) if timeline is not None else None
-	log = functools.partial(worker_color_log, int_to_color(os.getpid()), quiet=quiet)
-	log(f'Worker {counter} ({role}) scheduled to start at {thread_start_time-time.perf_counter():.4f} later.')
-	# readers read the layout's files and create content only if one must be recreated
-	content = FileContent(file_size, zeros, unique, new_stamp_id(), block_size, verify)
-	if role == 'write':
-		content.prepare()
-	# before the start barrier, as plain workers do: zero-filling it is not part of the timed pass
-	read_buffer = bytearray(block_size or file_size) if role == 'read' else None
-	if late_starts is not None and time.perf_counter() > thread_start_time:
-		late_starts.append(time.perf_counter() - thread_start_time)
-	wait_for_barrier(thread_start_time)
-	worker_dir = simultaneous_worker_dir(base_directory, run_id, counter)
-	os.makedirs(worker_dir, exist_ok=True)
-	file_prefix = 'write_' if role == 'write' else 'read_'
-	# with -q no per-op log line is built, as in worker()
-	for i in range(file_count):
-		i_str = str(i + 1).zfill(len(str(file_count)))
-		file_name = os.path.join(worker_dir, f"{file_prefix}{i_str}.bin")
-		write_file = functools.partial(content.write, index=i, quiet=quiet)
-		attempt = time.perf_counter() if local_timeline is not None else None
-		if role == 'write':
-			op_result = write_file(file_name)
-			if local_timeline is not None:
-				local_timeline.add('write', i + 1, attempt, op_result)
-			op = op_time(op_result)
-			local_results.append(op)
-			if not quiet:
-				log(f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tWrote\t{format_op(op)}")
-		else:
-			op_result = read_file(file_name, file_size, quiet, buffer=read_buffer, recreate=write_file, block_size=block_size, verify=verify)
-			if local_timeline is not None:
-				local_timeline.add('read', i + 1, attempt, op_result)
-			op = op_time(op_result)
-			local_results.append(op)
-			if not quiet:
-				log(f"[Process {os.getpid()}]\tFile {i_str}/{file_count}:\t{file_name}\tRead\t{format_op(op)}")
-	log(f'Worker {counter} ({role}) finished.')
-	if local_timeline is not None:
-		# one record per worker and pass, so the manager sees one append, not one per op. Before the results,
-		# as in worker(): results that arrived must not also count as a dead worker's failed ops
-		timeline.append(local_timeline.record())
-	results.append(results_record(local_results))
-
 def cleanup_simultaneous_tree(directories, run_id):
 	# the run's tree in each directory that has one
 	for base in directories:
-		simul_root = os.path.join(base, f".iotest_simul_{run_id}")
-		if os.path.isdir(simul_root):
-			shutil.rmtree(simul_root, ignore_errors=True)
+		shutil.rmtree(os.path.join(base, f".iotest_simul_{run_id}"), ignore_errors=True)
 
 def run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
 		quiet, zeros, tl, unique=False, block_size=None, verify=False, manager=None):
@@ -1275,20 +1033,18 @@ def addToDicWithoutOverwrite(dic,key,value):
 	else:
 		dic[key] = value
 
-def add_op_results(outResults, failedOps, key, samples):
-	# failed ops carry their error text instead of a duration (see op_time).
-	# Always add to both dicts so repeated keys get renamed in lockstep.
+def add_key(keys, key, samples, process_count, total_time=None, late=(), estimated=False, planned_ops=None):
+	# one result key of a pass, as one record: its op times and failed ops (a failed op carries its error text
+	# instead of a duration, see op_time), the pass's wall time, the workers that ran it and how late they started.
+	# planned_ops: the read files of a failed simultaneous layout pass. A repeated key is renamed (write_1,
+	# write_2, ...) with all its figures; returns the record
 	times, failed = [], []
 	for sample in samples:
 		(failed if isinstance(sample, str) else times).append(sample)
-	addToDicWithoutOverwrite(outResults, key, times)
-	addToDicWithoutOverwrite(failedOps, key, failed)
-	return times
-
-def record_pass_meta(late_starts, sync_estimated, key, late, estimated):
-	# kept in lockstep with outResults, so a repeated key is renamed in all of them
-	addToDicWithoutOverwrite(late_starts, key, (len(late), max(late) if late else 0.0))
-	addToDicWithoutOverwrite(sync_estimated, key, estimated)
+	record = {'times': times, 'failed': failed, 'total_time': total_time, 'process_count': process_count,
+		'late': (len(late), max(late) if late else 0.0), 'estimated': estimated, 'planned_ops': planned_ops}
+	addToDicWithoutOverwrite(keys, key, record)
+	return record
 
 def warn_late_starts(tl, mode, late, process_count):
 	if late:
@@ -1632,8 +1388,8 @@ def collect_timeline(timeline_passes, pass_timeline, pass_index, mode):
 
 def timeline_ops(record):
 	# one worker's ops of one pass, in the order it ran them, so by start: (start, op, worker, file_index, duration, error)
-	counter, index_type, ops, file_indexes, starts, durations, errors = record
-	file_indexes = memoryview(file_indexes).cast(index_type)
+	counter, ops, file_indexes, starts, durations, errors = record
+	file_indexes = memoryview(file_indexes).cast('I')
 	starts = memoryview(starts).cast('d')
 	durations = memoryview(durations).cast('d')
 	for position, start in enumerate(starts):
@@ -1737,12 +1493,12 @@ def format_key_report(mode, stats, late, estimated, zeros, dedup_notes, planned_
 	report.append("-"*80)
 	return report
 
-def build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors, start_late=()):
+def build_json_summary(options, started, key_stats, keys, report_errors, start_late=()):
 	results = {}
 	for key, stats in key_stats.items():
 		entry = dict(stats)
-		entry['sync_estimated'] = bool(sync_estimated.get(key))
-		late_n, late_max = late_starts.get(key, (0, 0.0))
+		entry['sync_estimated'] = keys[key]['estimated']
+		late_n, late_max = keys[key]['late']
 		entry['late_workers'] = late_n
 		entry['max_late_s'] = late_max
 		results[key] = entry
@@ -1846,16 +1602,10 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		for note in dedup_notes:
 			tl.teelog(note, level='warning')
 	processes = []
-	outResults = dict()
-	failedOps = {}
-	# the read files each failed layout pass was to write, under its key in outResults
-	layout_files = {}
-	late_starts = {}
+	# result key -> its record (add_key())
+	keys = {}
 	start_notes = []
 	start_late = []
-	sync_estimated = {}
-	totalTime = {}
-	mode_process_counts = {}
 	scan = None
 	if any(mode in ('write', 'random', 'read') for mode in modes):
 		# one os.stat per temp file, for the free-space check and for which read workers recreate files
@@ -1867,11 +1617,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	estimatedTotalMemory = sum(worker_memory)
 	if modes == ['benchmark']:
 		file_count = 0
-	try:
-		phyFreeMemory, swapMemory = read_meminfo()
-	except Exception:
-		phyFreeMemory, swapMemory = -1, -1
-		tl.teeerror("Failed to read /proc/meminfo")
+	phyFreeMemory, swapMemory = read_meminfo()
 	# warn if the estimated total memory is more than 90% of the total free memory
 	if phyFreeMemory + swapMemory > 0 and estimatedTotalMemory > phyFreeMemory + swapMemory:
 		tl.teeerror("Estimated total memory usage is more than the all available memory to use.")
@@ -1919,9 +1665,6 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				gen_benchmark_workers = process_count // 2
 		else:
 			gen_benchmark_workers = process_count
-		effective_benchmark_time = options.benchmark_time
-		if is_simultaneous and tuning_attempt:
-			effective_benchmark_time = SIMULTANEOUS_TUNING_BENCHMARK_TIME
 		# measured before the generation benchmark's processes compete for memory bandwidth
 		alloc_workers = read_buffer_workers(modes, process_count, simultaneous_write_count)
 		alloc_time = read_buffer_alloc_time(read_size, alloc_workers, measure_alloc_speed(read_size)) if alloc_workers else 0.0
@@ -1946,9 +1689,9 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				generator = 'random.getrandbits'
 			# workers generate only the buffer they hold
 			buffer_kind = 'chunk pools' if block_size else 'files'
-			tl.teeprint(f"Benchmarking file generation performance... using {gen_benchmark_workers}x {generator} with {format_bytes(buffer_size)}B {buffer_kind} * {file_count if file_count else '∞'} for {effective_benchmark_time}s")
+			tl.teeprint(f"Benchmarking file generation performance... using {gen_benchmark_workers}x {generator} with {format_bytes(buffer_size)}B {buffer_kind} * {file_count if file_count else '∞'} for {options.benchmark_time}s")
 			for counter in range(gen_benchmark_workers):
-				p = Process(target=benchmarkGenSpeed, args=(buffer_size, file_count,zeros,results,effective_benchmark_time))
+				p = Process(target=benchmarkGenSpeed, args=(buffer_size, file_count,zeros,results,options.benchmark_time))
 				processes.append(p)
 			genStartTime = time.perf_counter()
 			start_processes(processes)
@@ -2001,13 +1744,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 						layout_failures = run_simultaneous_layout(file_count, file_size, directories, run_id, layout_worker_count,
 							quiet, zeros, tl, unique, block_size, verify, manager)
 						if layout_failures:
-							# a key of their own, kept in lockstep like the others (layout_1, layout_2, ... when
-							# several passes fail), so the report, the JSON and the report files show them and the
-							# run exits 1. The layout's writes are not timed: it has failures and no times
-							add_op_results(outResults, failedOps, 'layout', layout_failures)
-							addToDicWithoutOverwrite(layout_files, 'layout', file_count * layout_worker_count)
-							addToDicWithoutOverwrite(mode_process_counts, 'layout', layout_worker_count)
-							record_pass_meta(late_starts, sync_estimated, 'layout', (), False)
+							# a key of their own (layout_1, layout_2, ... when several passes fail), so the report,
+							# the JSON and the report files show them and the run exits 1. The layout's writes are
+							# not timed: it has failures and no times
+							add_key(keys, 'layout', layout_failures, layout_worker_count,
+								planned_ops=file_count * layout_worker_count)
 							# the finally below still cleans the tree up
 							continue
 					write_results = manager.list()
@@ -2015,27 +1756,20 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					write_late = manager.list()
 					read_late = manager.list()
 					pass_timeline = manager.list() if timeline_passes is not None else None
-					write_processes = []
-					read_processes = []
 					if sync_start_at is not None:
 						thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes, start_late)
 						sync_start_at = None
 					else:
 						thread_start_time = time.perf_counter() + processStartDelay
 					tl.teeprint(f"Simultaneous mode: {write_count} writers + {read_count} readers...")
-					for counter in range(write_count):
-						assigned_directory = directories[counter % len(directories)]
-						# tuning attempts at smaller counts overwrite the same writer files
-						counter_str = worker_counter_name(counter)
-						p = Process(target=simultaneous_role_worker, args=('write', file_count, file_size, assigned_directory, run_id, counter_str, write_results, quiet, zeros, thread_start_time, unique, write_late, pass_timeline, block_size, verify))
-						write_processes.append(p)
-					for counter in range(read_count):
-						assigned_directory = directories[counter % len(directories)]
-						# the layout pass's files: the tuner lays out for its largest process count
-						# and then runs smaller attempts
-						counter_str = worker_counter_name(counter)
-						p = Process(target=simultaneous_role_worker, args=('read', file_count, file_size, assigned_directory, run_id, counter_str, read_results, quiet, zeros, thread_start_time, unique, read_late, pass_timeline, block_size, verify))
-						read_processes.append(p)
+					def role_workers(role, count, role_results, role_late):
+						# the first workers of the role: tuning attempts at smaller counts overwrite the same writer
+						# files and read the layout's files, which the tuner lays out for its largest process count
+						return [Process(target=worker, args=(file_count, file_size, directories[counter % len(directories)],
+							role_results, role, worker_counter_name(counter), quiet, zeros, thread_start_time, unique, False,
+							role_late, False, pass_timeline, block_size, verify, run_id)) for counter in range(count)]
+					write_processes = role_workers('write', write_count, write_results, write_late)
+					read_processes = role_workers('read', read_count, read_results, read_late)
 					totalStartTime = thread_start_time
 					start_processes(write_processes + read_processes)
 					for p in write_processes:
@@ -2047,14 +1781,10 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					# one bulk fetch per list: iterating a proxy costs a round trip per item
 					write_results, read_results = write_results[:], read_results[:]
 					write_late, read_late = write_late[:], read_late[:]
-					add_op_results(outResults, failedOps, 'write', itertools.chain(result_samples(write_results), dead_worker_errors(write_processes, file_count)))
-					add_op_results(outResults, failedOps, 'read', itertools.chain(result_samples(read_results), dead_worker_errors(read_processes, file_count)))
-					addToDicWithoutOverwrite(totalTime, 'write', write_sync_time)
-					addToDicWithoutOverwrite(totalTime, 'read', read_sync_time)
-					addToDicWithoutOverwrite(mode_process_counts, 'write', write_count)
-					addToDicWithoutOverwrite(mode_process_counts, 'read', read_count)
-					record_pass_meta(late_starts, sync_estimated, 'write', write_late, False)
-					record_pass_meta(late_starts, sync_estimated, 'read', read_late, False)
+					add_key(keys, 'write', itertools.chain(result_samples(write_results), dead_worker_errors(write_processes, file_count)),
+						write_count, write_sync_time, write_late)
+					add_key(keys, 'read', itertools.chain(result_samples(read_results), dead_worker_errors(read_processes, file_count)),
+						read_count, read_sync_time, read_late)
 					collect_timeline(timeline_passes, pass_timeline, pass_index, mode)
 					warn_late_starts(tl, 'simultaneous', write_late + read_late, process_count)
 				finally:
@@ -2089,65 +1819,41 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			collect_timeline(timeline_passes, pass_timeline, pass_index, 'meta' if mode.startswith('meta_') else mode)
 			if mode == 'comprehensive':
 				# a worker's record holds each file's write, move, stat and read in turn
-				writes, moves, stats, reads = [add_op_results(outResults, failedOps, key,
-					itertools.chain(result_samples(results, every=4, offset=offset), dead_errors))
-					for offset, key in enumerate(('write', 'move', 'stat', 'read'))]
-				sumWTime = sum(writes)
-				sumMTime = sum(moves)
-				sumSTime = sum(stats)
-				sumRTime = sum(reads)
-				sumAllTime = sumWTime + sumMTime + sumSTime + sumRTime
-				for key in ('write','move','stat','read'):
-					addToDicWithoutOverwrite(mode_process_counts,key,process_count)
-					record_pass_meta(late_starts, sync_estimated, key, late, True)
-				if sumAllTime > 0:
-					addToDicWithoutOverwrite(totalTime,'write',totalEndTime * (sumWTime / sumAllTime))
-					addToDicWithoutOverwrite(totalTime,'move',totalEndTime * (sumMTime / sumAllTime))
-					addToDicWithoutOverwrite(totalTime,'stat',totalEndTime * (sumSTime / sumAllTime))
-					addToDicWithoutOverwrite(totalTime,'read',totalEndTime * (sumRTime / sumAllTime))
-				else:
-					addToDicWithoutOverwrite(totalTime,'write',totalEndTime)
-					addToDicWithoutOverwrite(totalTime,'move',totalEndTime)
-					addToDicWithoutOverwrite(totalTime,'stat',totalEndTime)
-					addToDicWithoutOverwrite(totalTime,'read',totalEndTime)
+				records = [add_key(keys, key, itertools.chain(result_samples(results, every=4, offset=offset), dead_errors),
+					process_count, late=late, estimated=True) for offset, key in enumerate(('write', 'move', 'stat', 'read'))]
+				# the pass's wall time, split across the four by their share of op time
+				sums = [sum(record['times']) for record in records]
+				for record, part in zip(records, sums):
+					record['total_time'] = totalEndTime * (part / sum(sums)) if sum(sums) > 0 else totalEndTime
 			elif mode == 'random':
 				# each op's kind is in its worker's record; dead workers never reported, so their kind is unknown
 				for kind in ('write', 'read'):
 					if any(OP_CODES[kind] in kinds for _, kinds, _ in results):
-						add_op_results(outResults,failedOps,'random_' + kind,result_samples(results, kind=OP_CODES[kind]))
-						addToDicWithoutOverwrite(totalTime,'random_' + kind,totalEndTime)
-						addToDicWithoutOverwrite(mode_process_counts,'random_' + kind,process_count)
-						record_pass_meta(late_starts, sync_estimated, 'random_' + kind, late, False)
+						add_key(keys, 'random_' + kind, result_samples(results, kind=OP_CODES[kind]), process_count, totalEndTime, late)
 				if dead_errors:
-					add_op_results(outResults,failedOps,'random',dead_errors)
-					addToDicWithoutOverwrite(totalTime,'random',totalEndTime)
-					addToDicWithoutOverwrite(mode_process_counts,'random',process_count)
-					record_pass_meta(late_starts, sync_estimated, 'random', late, False)
+					add_key(keys, 'random', dead_errors, process_count, totalEndTime, late)
 			else:
-				add_op_results(outResults,failedOps,mode,itertools.chain(result_samples(results), dead_errors))
-				addToDicWithoutOverwrite(totalTime,mode,totalEndTime)
-				addToDicWithoutOverwrite(mode_process_counts,mode,process_count)
-				record_pass_meta(late_starts, sync_estimated, mode, late, False)
+				add_key(keys, mode, itertools.chain(result_samples(results), dead_errors), process_count, totalEndTime, late)
 			warn_late_starts(tl, mode, late, process_count)
 	report_errors = []
-	writes_reports = not options.no_report and bool(outResults)
+	writes_reports = not options.no_report and bool(keys)
 	# an explicit --timeline is written also with -nr (and -S), like --json
-	writes_timeline = timeline_passes is not None and bool(outResults)
+	writes_timeline = timeline_passes is not None and bool(keys)
 	if writes_reports or writes_timeline:
 		report_base = os.path.join(primary_directory, report_base_name(modes, directories, file_size, file_count, process_count, tl.currentDateTime))
 	report = list(start_notes)
 	short_reports = []
 	threshold_to_report_anomaly = options.threshold_to_report_anomaly
 	key_stats = {}
-	for mode in outResults:
-		stats = summarize_key(outResults[mode], failedOps.get(mode, []), mode_process_counts.get(mode, process_count), totalTime.get(mode), file_size, 'write' in mode or 'read' in mode)
+	for mode, record in keys.items():
+		stats = summarize_key(record['times'], record['failed'], record['process_count'], record['total_time'], file_size, 'write' in mode or 'read' in mode)
 		key_stats[mode] = stats
-		failed = failedOps.get(mode, [])
-		planned_ops = layout_files.get(mode)
+		failed = record['failed']
+		planned_ops = record['planned_ops']
 		op_count = stats['ops'] + stats['failed'] if planned_ops is None else planned_ops
 		failed_note = f", {stats['failed']} of {op_count} ops failed" if failed else ''
-		report.extend(format_key_report(mode, stats, late_starts.get(mode, (0, 0.0)), sync_estimated.get(mode), zeros, dedup_notes, planned_ops))
-		if not outResults[mode]:
+		report.extend(format_key_report(mode, stats, record['late'], record['estimated'], zeros, dedup_notes, planned_ops))
+		if not record['times']:
 			if options.message_end_point_address and failed:
 				failed_text = f"all {op_count}" if stats['failed'] == op_count else f"{stats['failed']} of {op_count}"
 				short_reports.append(f"Short Report for {mode} mode: {failed_text} ops failed, first error: {failed[0]}")
@@ -2172,9 +1878,9 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		csv_file_name = report_base + REPORT_SUFFIXES[0]
 		def write_csv(f):
 			# the headers are just the keys in the dic, the values are the list of results
-			f.write(','.join([key+'_time' for key in outResults.keys()]) + '\n')
+			f.write(','.join([key+'_time' for key in keys]) + '\n')
 			# columns can differ in length (uneven simultaneous splits, failed ops), so pad short ones with blank cells
-			for row in itertools.zip_longest(*outResults.values(), fillvalue=''):
+			for row in itertools.zip_longest(*(record['times'] for record in keys.values()), fillvalue=''):
 				f.write(','.join(map(str,row)) + '\n')
 		if write_report_file(csv_file_name, write_csv, tl, report_errors):
 			tl.teeprint(f"\nResults written to {csv_file_name}")
@@ -2188,7 +1894,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 	if writes_reports:
 		print(f"Log file: {tl.logFileName}")
 	if options.json_path:
-		write_json_summary(options.json_path, build_json_summary(options, started, key_stats, late_starts, sync_estimated, report_errors, start_late), tl, report_errors)
+		write_json_summary(options.json_path, build_json_summary(options, started, key_stats, keys, report_errors, start_late), tl, report_errors)
 	if options.cleanup:
 		# only after passes that use the temp files: -pc 64 -fc 100000 meta would otherwise try 6.4 million
 		# unlinks of files that never existed. Meta passes clean up their own directories
@@ -2198,16 +1904,18 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			cleanup_meta_dirs(directories, process_count)
 	if options.message_end_point_address and short_reports:
 		send_short_reports(options.message_end_point_address, short_reports, tl)
+	def by_key(field):
+		return {key: record[field] for key, record in keys.items() if record[field] is not None}
 	return {
-		'outResults': outResults,
-		'totalTime': totalTime,
+		'outResults': by_key('times'),
+		'totalTime': by_key('total_time'),
 		'process_count': process_count,
 		'file_size': file_size,
 		'file_count': file_count,
-		'mode_process_counts': mode_process_counts,
-		'failedOps': failedOps,
-		'late_starts': late_starts,
-		'sync_estimated': sync_estimated,
+		'mode_process_counts': by_key('process_count'),
+		'failedOps': by_key('failed'),
+		'late_starts': by_key('late'),
+		'sync_estimated': by_key('estimated'),
 		'report_errors': report_errors,
 	}
 
@@ -2242,13 +1950,6 @@ def parse_modes(mode_args):
 		if key in MODE_ALIASES:
 			modes.extend(MODE_ALIASES[key])
 	return modes
-
-def _simultaneous_session_kwargs(run_id, skip_layout=True, skip_cleanup=True):
-	return {
-		'simultaneous_run_id': run_id,
-		'simultaneous_skip_layout': skip_layout,
-		'simultaneous_skip_cleanup': skip_cleanup,
-	}
 
 def _run_tuning_main(options, tl, process_count, simultaneous_write_count=None, simultaneous_session=None):
 	kwargs = simultaneous_session or {}
@@ -2361,6 +2062,7 @@ def estimate_simultaneous_split(process_count, write_target, read_target):
 	return write_count, read_count
 
 def tune_simultaneous(options, tl, write_target, read_target):
+	# its attempts, and its final run, benchmark generation for this long
 	options = options.replace(benchmark_time=SIMULTANEOUS_TUNING_BENCHMARK_TIME)
 	max_pc = options.process_count
 	pc = options.process_count
@@ -2369,7 +2071,8 @@ def tune_simultaneous(options, tl, write_target, read_target):
 		os.makedirs(output_dir, exist_ok=True)
 	run_id = tl.currentDateTime
 	layout_workers = max(max_pc - 1, 1)
-	sim_session = _simultaneous_session_kwargs(run_id)
+	# every run reads the layout written here, once, and leaves the tree for the next
+	sim_session = {'simultaneous_run_id': run_id, 'simultaneous_skip_layout': True, 'simultaneous_skip_cleanup': True}
 	if write_target and read_target:
 		write_count, read_count = estimate_simultaneous_split(pc, write_target, read_target)
 		split_note = (f"estimated {write_count} writers + {read_count} readers from target ratio "
@@ -2392,6 +2095,11 @@ def tune_simultaneous(options, tl, write_target, read_target):
 		else:
 			write_count = new_pc // 2
 			read_count = new_pc - write_count
+	def shift_to_writers(n):
+		# n workers move from reading to writing (n < 0: from writing to reading)
+		nonlocal write_count, read_count
+		write_count += n
+		read_count -= n
 	def finalize_simultaneous_tuning():
 		_finalize_tuning_run(options, tl, pc, write_count, simultaneous_session=sim_session)
 	last_valid = None
@@ -2439,56 +2147,30 @@ def tune_simultaneous(options, tl, write_target, read_target):
 			read_status = throughput_status(read_measured, read_target) if read_target else None
 			tl.teeprint(f"tpt attempt {attempt}: pc={pc} ({write_count}w+{read_count}r) "
 				f"write={format_bytes(write_measured)}B/s read={format_bytes(read_measured)}B/s")
-			if write_target and not read_target:
-				if write_status != 'below':
+			if not (write_target and read_target):
+				# one target: its role gains a worker while below it and gives one up while above it, then pc goes down
+				role = 'write' if write_target else 'read'
+				status, measured, target = (write_status, write_measured, write_target) if write_target else (read_status, read_measured, read_target)
+				role_count, other_count = (write_count, read_count) if write_target else (read_count, write_count)
+				to_role = 1 if write_target else -1
+				if status != 'below':
 					note_valid_config()
-				if write_status == 'below':
-					if accept_last_valid("Cannot reduce write workers without missing write target;"):
+				if status == 'below':
+					if accept_last_valid(f"Cannot reduce {role} workers without missing {role} target;"):
 						return 0
-					if read_count > 1:
-						write_count += 1
-						read_count -= 1
+					if other_count > 1:
+						shift_to_writers(to_role)
 						continue
-					tl.teeerror(f"Cannot meet write target throughput {format_bytes(write_target)}B/s: "
-						f"measured {format_bytes(write_measured)}B/s.")
+					tl.teeerror(f"Cannot meet {role} target throughput {format_bytes(target)}B/s: "
+						f"measured {format_bytes(measured)}B/s.")
 					sys.exit(1)
-				if write_status == 'ok':
-					tl.teeprint(f"Write target reached: {write_count} writers + {read_count} readers, "
-						f"measured={format_bytes(write_measured)}B/s")
+				if status == 'ok':
+					tl.teeprint(f"{role.capitalize()} target reached: {write_count} writers + {read_count} readers, "
+						f"measured={format_bytes(measured)}B/s")
 					finalize_simultaneous_tuning()
 					return 0
-				if write_count > 1:
-					write_count -= 1
-					read_count += 1
-					continue
-				if pc > 2:
-					pc -= 1
-					reset_split_for_pc(pc)
-					continue
-				tl.teeprint("At minimum simultaneous configuration; accepting as best effort.")
-				finalize_simultaneous_tuning()
-				return 0
-			if read_target and not write_target:
-				if read_status != 'below':
-					note_valid_config()
-				if read_status == 'below':
-					if accept_last_valid("Cannot reduce read workers without missing read target;"):
-						return 0
-					if write_count > 1:
-						write_count -= 1
-						read_count += 1
-						continue
-					tl.teeerror(f"Cannot meet read target throughput {format_bytes(read_target)}B/s: "
-						f"measured {format_bytes(read_measured)}B/s.")
-					sys.exit(1)
-				if read_status == 'ok':
-					tl.teeprint(f"Read target reached: {write_count} writers + {read_count} readers, "
-						f"measured={format_bytes(read_measured)}B/s")
-					finalize_simultaneous_tuning()
-					return 0
-				if read_count > 1:
-					write_count += 1
-					read_count -= 1
+				if role_count > 1:
+					shift_to_writers(-to_role)
 					continue
 				if pc > 2:
 					pc -= 1
@@ -2510,12 +2192,10 @@ def tune_simultaneous(options, tl, write_target, read_target):
 				if accept_last_valid("Cannot adjust worker ratio without missing a target;"):
 					return 0
 				if write_status == 'below' and read_count > 1:
-					write_count += 1
-					read_count -= 1
+					shift_to_writers(1)
 					continue
 				if read_status == 'below' and write_count > 1:
-					write_count -= 1
-					read_count += 1
+					shift_to_writers(-1)
 					continue
 				tl.teeerror("Cannot balance simultaneous write/read ratio to meet both targets.")
 				sys.exit(1)
@@ -2532,12 +2212,10 @@ def tune_simultaneous(options, tl, write_target, read_target):
 				write_ratio = write_measured / write_target
 				read_ratio = read_measured / read_target
 				if write_ratio > read_ratio and write_count > 1:
-					write_count -= 1
-					read_count += 1
+					shift_to_writers(-1)
 					continue
 				if read_ratio > write_ratio and read_count > 1:
-					write_count += 1
-					read_count -= 1
+					shift_to_writers(1)
 					continue
 				if pc > 2:
 					pc -= 1
@@ -2548,8 +2226,7 @@ def tune_simultaneous(options, tl, write_target, read_target):
 				return 0
 			if write_status == 'above' and read_status == 'ok':
 				if write_count > 1:
-					write_count -= 1
-					read_count += 1
+					shift_to_writers(-1)
 					continue
 				if pc > 2:
 					pc -= 1
@@ -2559,8 +2236,7 @@ def tune_simultaneous(options, tl, write_target, read_target):
 				return 0
 			if read_status == 'above' and write_status == 'ok':
 				if read_count > 1:
-					write_count += 1
-					read_count -= 1
+					shift_to_writers(1)
 					continue
 				if pc > 2:
 					pc -= 1
@@ -2702,7 +2378,6 @@ def climain():
 		args.no_report = True
 	if args.no_log:
 		args.log_directory = '/dev/null'
-	#tl = Tee_Logger.teeLogger(args.log_directory,'iotest',2,10)
 	tl = Tee_Logger.teeLogger(systemLogFileDir=args.log_directory,programName='iotest',compressLogAfterMonths=1,deleteLogAfterYears=3,suppressPrintout=args.stealth,noLog=args.no_log,in_place_compression=True)
 	tl.info(f'Arguments: {vars(args)}')
 	file_size_specified = args.file_size is not None
@@ -2718,23 +2393,15 @@ def climain():
 		if file_size_specified and file_count_specified and process_count_specified:
 			tl.teelog("Warning | iotest: -ts/--total_size is ignored because -fs, -fc, and -pc/-t are all explicitly set.", level='warning')
 		else:
+			# -fs, -fc, -pc and -ts are each at least 1
 			if not file_count_specified:
-				denominator = args.file_size * args.process_count
-				if denominator <= 0:
-					raise ValueError("Cannot calculate file_count because file_size * process_count is invalid")
-				args.file_count = max(total_size // denominator, 1)
+				args.file_count = max(total_size // (args.file_size * args.process_count), 1)
 				tl.teelog(f"Adjusted -fc to {args.file_count} to fit total_size {format_bytes(total_size)}B", level='info')
 			elif not file_size_specified:
-				denominator = args.file_count * args.process_count
-				if denominator <= 0:
-					raise ValueError("Cannot calculate file_size because file_count * process_count is invalid")
-				args.file_size = max(total_size // denominator, 1)
+				args.file_size = max(total_size // (args.file_count * args.process_count), 1)
 				tl.teelog(f"Adjusted -fs to {format_bytes(args.file_size)}B to fit total_size {format_bytes(total_size)}B", level='info')
 			elif not process_count_specified:
-				denominator = args.file_size * args.file_count
-				if denominator <= 0:
-					raise ValueError("Cannot calculate process_count because file_size * file_count is invalid")
-				args.process_count = max(total_size // denominator, 1)
+				args.process_count = max(total_size // (args.file_size * args.file_count), 1)
 				tl.teelog(f"Adjusted -t/-pc to {args.process_count} to fit total_size {format_bytes(total_size)}B", level='info')
 	# after -ts, which can set the file size
 	if args.verify and args.file_size < 28:

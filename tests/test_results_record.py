@@ -55,12 +55,23 @@ def test_comprehensive_records_hold_four_ops_per_file(iotest_mod):
     assert per_key == [["write failed", 5.0], [2.0, 6.0], [3.0, 7.0], [4.0, "read failed"]]
 
 
-def test_add_op_results_takes_the_samples_in_one_pass(iotest_mod):
-    out, failed = {}, {}
+def test_add_key_takes_the_samples_in_one_pass(iotest_mod):
+    keys = {}
     record = iotest_mod.results_record([0.5, "boom", 0.25])
-    times = iotest_mod.add_op_results(out, failed, "write", itertools.chain(iotest_mod.result_samples([record]), ["dead"]))
-    assert times == [0.5, 0.25]
-    assert out == {"write": [0.5, 0.25]} and failed == {"write": ["boom", "dead"]}
+    added = iotest_mod.add_key(keys, "write", itertools.chain(iotest_mod.result_samples([record]), ["dead"]), 2, 1.5,
+        [0.25, 0.5])
+    assert keys == {"write": added}
+    assert added == {"times": [0.5, 0.25], "failed": ["boom", "dead"], "total_time": 1.5, "process_count": 2,
+                     "late": (2, 0.5), "estimated": False, "planned_ops": None}
+
+
+def test_a_repeated_key_is_renamed_with_all_its_figures(iotest_mod):
+    keys = {}
+    first = iotest_mod.add_key(keys, "write", [1.0], 1, 1.0)
+    iotest_mod.add_key(keys, "read", [2.0], 1, 2.0)
+    second = iotest_mod.add_key(keys, "write", ["boom"], 3, 3.0)
+    assert list(keys) == ["read", "write_1", "write_2"]
+    assert keys["write_1"] is first and keys["write_2"] is second
 
 
 def test_worker_hands_over_one_results_record(iotest_mod, work_dir):

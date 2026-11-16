@@ -31,22 +31,24 @@ def test_create_file_finishes_partial_writes(iotest_mod, tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
-def test_create_file_fallback_continues_after_partial_progress(iotest_mod, tmp_path, monkeypatch):
-    content = os.urandom(2500)
+@pytest.mark.parametrize("op", ["write", "read"])
+def test_a_refused_call_fails_the_op_on_its_first_error(iotest_mod, tmp_path, monkeypatch, op):
+    # no retry: the op fails with the error the OS gave, after one call
     target = tmp_path / "f.bin"
+    target.write_bytes(b"\x01" * 64)
     calls = []
 
-    def writev_then_fail(fd, buffers):
+    def refused(fd, buffers):
         calls.append(len(buffers[0]))
-        if len(calls) > 1:
-            raise OSError("writev unavailable")
-        return short_writev(fd, buffers)
+        raise OSError(5, "Input/output error")
 
-    monkeypatch.setattr(iotest_mod.os, "writev", writev_then_fail)
-    op = iotest_mod.op_time(iotest_mod.create_file(str(target), content, len(content), quiet=True))
-    assert not isinstance(op, str), op
-    # the f.write fallback must write only what is left, not the whole buffer again
-    assert target.read_bytes() == content
+    monkeypatch.setattr(iotest_mod.os, op + "v", refused)
+    if op == "write":
+        result = iotest_mod.create_file(str(target), b"\x01" * 64, 64, quiet=True)
+    else:
+        result = iotest_mod.read_file(str(target), 64, quiet=True)
+    assert iotest_mod.op_time(result) == "OSError: [Errno 5] Input/output error"
+    assert calls == [64]
 
 
 @pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
@@ -115,7 +117,7 @@ def test_each_syscall_is_capped_at_max_io_chunk(iotest_mod, tmp_path, monkeypatc
 @pytest.mark.skipif(not hasattr(os, "writev"), reason="os.writev and os.readv are not available on Windows")
 @pytest.mark.parametrize("call,op", [("posix_fadvise", "write"), ("writev", "write"), ("readv", "read")])
 def test_ctrl_c_during_io_is_not_swallowed(iotest_mod, tmp_path, monkeypatch, call, op):
-    # the posix_fadvise warning and the f.write / f.readinto fallbacks catch only OSError
+    # the file helpers turn an OSError into a failed op, never an interrupt
     if not hasattr(os, call):
         pytest.skip(f"no os.{call} here")
     target = tmp_path / "f.bin"

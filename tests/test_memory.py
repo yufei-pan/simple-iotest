@@ -6,10 +6,10 @@ import pytest
 MiB = 2**20
 
 
-def traced_peak(fn, *args):
+def traced_peak(fn, *args, **kwargs):
     tracemalloc.start()
     try:
-        fn(*args)
+        fn(*args, **kwargs)
         return tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
@@ -82,7 +82,7 @@ def test_worker_reuses_one_read_buffer(iotest_mod, work_dir, monkeypatch, mode):
 
 def test_simultaneous_reader_reuses_one_read_buffer(iotest_mod, work_dir, monkeypatch):
     seen = spy_read_buffers(iotest_mod, monkeypatch)
-    iotest_mod.simultaneous_role_worker("read", 3, 4096, str(work_dir), "t", "0", [], True, True, 0)
+    iotest_mod.worker(3, 4096, str(work_dir), [], "read", "0", True, True, 0, simultaneous_run_id="t")
     assert len(seen) == 3
     assert seen[0] is not None
     assert all(b is seen[0] for b in seen)
@@ -195,8 +195,8 @@ def test_index_worker_holds_no_file_data(iotest_mod, work_dir):
 
 def test_simultaneous_reader_holds_only_its_read_buffer(iotest_mod, work_dir, rec_tl):
     iotest_mod.run_simultaneous_layout(2, 4 * MiB, [str(work_dir)], "t", 1, True, True, rec_tl)
-    peak = traced_peak(iotest_mod.simultaneous_role_worker,
-        "read", 2, 4 * MiB, str(work_dir), "t", iotest_mod.worker_counter_name(0), [], True, False, 0)
+    peak = traced_peak(iotest_mod.worker, 2, 4 * MiB, str(work_dir), [], "read", iotest_mod.worker_counter_name(0),
+        True, False, 0, simultaneous_run_id="t")
     assert peak < 1.5 * 4 * MiB
 
 

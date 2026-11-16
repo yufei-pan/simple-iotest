@@ -322,6 +322,26 @@ def test_simul_tuning_write_only_below_accepts_last_valid(iotest_mod, work_dir, 
     assert finalized
 
 
+@pytest.mark.parametrize("role,expected_writers", [("write", 3), ("read", 1)])
+def test_simul_tuning_below_target_first_moves_a_worker_to_the_target_role(iotest_mod, work_dir, rec_tl, monkeypatch, role, expected_writers):
+    # one target, pc=4 (2 writers + 2 readers), the first attempt below it and no valid configuration yet: the
+    # second attempt has one more worker in the target's role, so 3 writers for a write target, 1 for a read target
+    measured = iter([500, 1000])
+    finalized = _stub_simul(iotest_mod, monkeypatch, lambda result, r: next(measured) if r == role else 2000, process_count=4)
+    attempts = []
+
+    def run(options, tl, process_count, simultaneous_write_count=None, simultaneous_session=None):
+        attempts.append((process_count, simultaneous_write_count))
+        return {"process_count": process_count, "outResults": {}, "totalTime": {}}
+
+    monkeypatch.setattr(iotest_mod, "_run_tuning_main", run)
+    rc = _call_simul(iotest_mod, work_dir, rec_tl, 1000 if role == "write" else None, 1000 if role == "read" else None,
+        process_count=4)
+    assert rc == 0
+    assert attempts == [(4, 2), (4, expected_writers)]
+    assert finalized
+
+
 def test_simul_tuning_write_only_above_walks_to_minimum(iotest_mod, work_dir, rec_tl, monkeypatch):
     # write-only, write above target at pc=4 -> reduce write_count then pc via
     # reset_split_for_pc else-branch until minimum -> accept best effort

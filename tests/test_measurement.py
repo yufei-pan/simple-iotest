@@ -283,8 +283,8 @@ def test_simultaneous_reader_allocates_its_buffer_before_the_start_barrier(iotes
     monkeypatch.setattr(iotest_mod, "bytearray", spy, raising=False)
     start = iotest_mod.time.perf_counter() + 0.3
     results = []
-    iotest_mod.simultaneous_role_worker("read", 1, 4096, str(work_dir), "t", iotest_mod.worker_counter_name(0),
-        results, True, True, start)
+    iotest_mod.worker(1, 4096, str(work_dir), results, "read", iotest_mod.worker_counter_name(0), True, True, start,
+        simultaneous_run_id="t")
     assert len(made_at) == 1 and made_at[0] < start
     assert not [s for s in iotest_mod.result_samples(results) if isinstance(s, str)]
 
@@ -308,8 +308,34 @@ def test_quiet_simultaneous_workers_build_no_per_op_log_line(iotest_mod, work_di
     iotest_mod.layout_read_worker(3, 1024, str(work_dir), "t", "0000", True, True)
     monkeypatch.setattr(iotest_mod, "format_op", lambda *a: pytest.fail("a log line was built"))
     results = []
-    iotest_mod.simultaneous_role_worker(role, 3, 1024, str(work_dir), "t", "0000", results, True, True, 0)
+    iotest_mod.worker(3, 1024, str(work_dir), results, role, "0000", True, True, 0, simultaneous_run_id="t")
     assert not [s for s in iotest_mod.result_samples(results) if isinstance(s, str)]
+
+
+def test_quiet_workers_print_a_progress_digit_every_tenth_of_their_files(iotest_mod, work_dir, capsys):
+    # the control of the next test: a plain quiet worker prints its digits, each after a carriage return
+    iotest_mod.worker(3, 1024, str(work_dir), [], "write", "0000", True, True, 0)
+    assert capsys.readouterr().out == "\r0\r1\r2"
+
+
+@pytest.mark.parametrize("role", ["write", "read"])
+def test_quiet_simultaneous_workers_print_no_progress_digits(iotest_mod, work_dir, capsys, role):
+    iotest_mod.layout_read_worker(3, 1024, str(work_dir), "t", "0000", True, True)
+    capsys.readouterr()
+    iotest_mod.worker(3, 1024, str(work_dir), [], role, "0000", True, True, 0, simultaneous_run_id="t")
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("", "")
+
+
+@pytest.mark.parametrize("role", ["write", "read"])
+def test_simultaneous_workers_use_their_runs_tree_and_the_role_names(iotest_mod, work_dir, role):
+    # the layout leaves read_<i>.bin; a writer adds write_<i>.bin beside them, a reader adds nothing, and
+    # neither touches the plain worker directory
+    iotest_mod.layout_read_worker(3, 1024, str(work_dir), "t", "0000", True, True)
+    iotest_mod.worker(3, 1024, str(work_dir), [], role, "0000", True, True, 0, simultaneous_run_id="t")
+    names = {f"read_{i}.bin" for i in (1, 2, 3)} | ({f"write_{i}.bin" for i in (1, 2, 3)} if role == "write" else set())
+    assert {p.name for p in (work_dir / ".iotest_simul_t" / "worker_0000").iterdir()} == names
+    assert [p.name for p in work_dir.iterdir()] == [".iotest_simul_t"]
 
 
 @pytest.mark.parametrize("mode,writes", [("meta_create", False), ("index", False), ("write", True), ("read", True)])
