@@ -4,7 +4,7 @@ Ever feel like fio is too complicated and too optimized? Well, simple-iotest cov
 
 Using the most simple non-optimized write() or writev() (just like your code!) to test file system io performance.
 
-Warning: each worker holds a whole test file in memory (random and comprehensive workers two of them), unless `-bs` is set: then up to 16 MiB of test data and one block. iotest also keeps about 80 to 140 bytes per operation for the results until the run ends (70 to 110 more with `-tl`). Before it starts, it estimates the memory the run needs: if that is more than the available memory plus swap, it lowers the process count; if it is more than 90% of the available memory, it warns and waits 15 seconds before going on.
+Warning: a worker that writes or reads holds a whole test file in memory (random and comprehensive workers, and a reader that recreates missing files, two of them; index and meta workers none), unless `-bs` is set: then up to 16 MiB of test data and one block. iotest also keeps about 80 to 140 bytes per operation for the results until the run ends (70 to 110 more with `-tl`). Before it starts, it estimates the memory the run needs: if that is more than the available memory plus swap, it lowers the process count; if it is more than 90% of the available memory, it warns and waits 15 seconds before going on.
 
 Note:
 	Tee_Logger is a required dependency and is installed automatically. Results are also logged to `/var/log/` by default (change it with `-ld`, or turn it off with `-nl`) for future keeping.
@@ -33,7 +33,7 @@ Default mode is **write** (`w`) when no mode is specified.
 
 ### Common Options
 - `-fs, --file_size`: Size of the test files (default: 30 MiB; suffix `m`, `g`, etc. supported).  
-- `-bs, --block_size`: Writes and reads each file in calls of this size (same units as `-fs`), so large files need little memory and small-I/O patterns can be tested. Each worker reads into a one-block buffer and writes from up to 16 MiB of its test data plus one block, made before the timed pass. The written data does not repeat within any 16 MiB (ZFS's largest recordsize), so storage compression cannot shrink the file and inflate the write figures (`-z` data still compresses). A short write or read is retried with the rest of its block, and a written file is synced once, after its last block. An operation is still one whole file: its time covers every block, and IOPS count files. With `-u`, each chunk is stamped just before it is written, inside the timed write (without `-bs`, the whole file is stamped before the timer starts). Default: unset, one call per file; a block size at least the file size is the same as unset.  
+- `-bs, --block_size`: Writes and reads each file in calls of this size (same units as `-fs`), so large files need little memory and small-I/O patterns can be tested. Each worker reads into a one-block buffer and writes from up to 16 MiB of its test data plus one block, made before the timed pass. Without `-z`, the written data does not repeat within any 16 MiB (ZFS's largest recordsize), so storage compression cannot shrink the file and inflate the write figures (`-z` data still compresses). A short write or read is retried with the rest of its block, and a written file is synced once, after its last block. An operation is still one whole file: its time covers every block, and IOPS count files. With `-u`, each chunk is stamped just before it is written, inside the timed write (without `-bs`, the whole file is stamped before the timer starts). Default: unset, one call per file; a block size at least the file size is the same as unset.  
 - `-fc, --file_count`: Number of files to process per worker (default: 50).  
 - `-pc, -t, --process_count`: Number of worker processes (default: 36).  
 - `-ts, --total_size`: Total size target. If one of `-fs`, `-fc` and `-pc` is omitted, it is calculated to fit this total (the file count first, then the file size, then the process count); it is ignored, with a warning, when all three are given.  
@@ -65,7 +65,7 @@ Default mode is **write** (`w`) when no mode is specified.
 - `random`: Random read/write steps. Reads and writes are reported separately, as `random_write` and `random_read` (and as separate CSV columns); both use the whole pass's wall time for the sync figures.  
 - `comprehensive` / `c`: write → move → stat → read per file. Each section ends with a note that its sync figures are estimates: the pass time is split across write/move/stat/read by their share of op time.  
 - `rw` / `wr`: Run write, then read sequentially in batch mode.  
-- `simultaneous` / `s`: Pre-writes read targets, then runs half the workers writing and half reading concurrently on separate files. Removes all temp files when done. If this layout pass cannot write every read file, the timed pass is skipped, the failures are reported under the result key `layout` (`Failed layout ops: <failed> of <read files>`), and iotest exits 1.  
+- `simultaneous` / `s`: Pre-writes read targets, then runs half the workers writing and half reading concurrently on separate files. Removes all temp files when done. It needs at least 2 processes: with one, iotest ends in a traceback and exits 1 (to become an invalid-argument exit 2). If this layout pass cannot write every read file, the timed pass is skipped, the failures are reported under the result key `layout` (`Failed layout ops: <failed> of <read files>`, an empty `layout_time` column in the CSV), and iotest exits 1.  
 - `rwi` / `wri`: Run write, then read, then index sequentially in batch mode.
 
 Example:
@@ -199,5 +199,5 @@ options:
 
 - Nothing needs doing. The options, test files, reports, CSV, JSON and timeline are unchanged.
 - Changed: a write or read the OS refuses fails on its first error, with that error's text. 3.70.1 retried it once through Python's `f.write()` / `f.readinto()`, which made the same call again (and printed `Failed to write using os.writev, trying f.write` with `-v`).
-- With `-v`, a simultaneous worker's start and end lines name its mode as the other workers' do, and a late simultaneous worker logs that it started late.
+- With `-v`, a simultaneous worker prints the same lines as any other worker: its start line ends `in write mode.` or `in read mode.`, its end line no longer names the role, and a late worker logs that it started late.
 - For code that imports iotest: `format_bytes()` only formats a number (`parse_size_arg()` parses sizes), and `simultaneous_role_worker()` is gone: `worker(..., simultaneous_run_id=...)` runs a simultaneous writer or reader. `main()` and `run_iotest()` take and return the same as in 3.70.1.
