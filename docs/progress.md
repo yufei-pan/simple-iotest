@@ -12,8 +12,10 @@ Open work lives here and nowhere else (RULES, "Long work: the progress file"). E
 - **Tests the 3.71.0 reviews found missing (also untested in 3.70.1).** State: not started. stat_file's failure tuple; comprehensive's wall-time split; the `-v` verb `Wrote`; the simultaneous `-v` lines ("in write mode", "finished", the late-start line). From: the 3.71.0 final review and second opinions.
 - **The "continue anyway in 15 seconds" message sleeps 16 s.** State: not started; pick one number at the source (the message and the sleep), then the README. Also in 3.70.1. From: the 3.71.0 second opinions.
 
+- **Workers' start time on a clock all processes share** (on macOS with Python 3.8 or 3.9 each pass waits as long as the run has lasted, and sync bandwidth and IOPS are wrong; 3.70.1 too). State: not started; the plan is in the deferred entry in docs/limitations.md. From: the week-48 cas-toolbox roll-up gate on the test Mac, 2026-11-21 (a deferral, not asked).
+
 ### Standing rows
-- **Deferred work** is in `docs/limitations.md` (entries of kind "deferred"); each names when it is revisited. One entry today: `-pc 1 simultaneous` (3.72.0, the row above).
+- **Deferred work** is in `docs/limitations.md` (entries of kind "deferred"); each names when it is revisited. Two entries today: `-pc 1 simultaneous` and the workers' start clock (3.72.0, the rows above).
 
 ## Standing decisions
 The user's rulings on how the cas repos are worked, one line each; a line changes only on the user's word. The cas monorepo's CLAUDE.md holds the same list, with how to reach the test machines.
