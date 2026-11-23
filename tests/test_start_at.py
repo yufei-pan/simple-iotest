@@ -142,8 +142,10 @@ def test_worker_turns_the_shared_start_into_its_own_clock(iotest_mod, work_dir, 
 def test_spawned_workers_start_on_time_when_the_parents_clock_differs(run_main, rec_tl, monkeypatch, modes, start_in, parent_offset):
     # spawned workers do not see this patch: the parent's perf_counter() runs ahead of theirs (120 s: a failure then
     # takes two minutes, not an hour), as a parent's did on macOS with Python 3.9 (a spawned worker is younger), or
-    # behind. 3.71.0's workers waited as long as it was ahead, or started that late. A wait the parent compensates
-    # for in its own wall time (it started the pass 120 s late, by its own clock) shows only in how long the run took
+    # behind. 3.71.0's workers waited as long as it was ahead, or started that late, and its totalTime shows it (120 s
+    # here). A half-revert, the start handed on perf_counter() while the parent keeps its own_clock() conversion, has
+    # the parent compensate for that wait in totalTime (it started the pass 120 s late, by its own clock): only how
+    # long the run took shows it
     previous = multiprocessing.get_start_method(allow_none=True)
     multiprocessing.set_start_method("spawn", force=True)
     real_perf = time.perf_counter
@@ -179,6 +181,28 @@ def test_a_pass_is_timed_on_perf_counter_whatever_the_shared_clock_counts(run_ma
     result = run_main(["read"], process_count=2)
     assert jump[0] == 3600
     assert result["failedOps"] == {"read": []}
+    assert 0 < result["totalTime"]["read"] < 60
+
+
+def test_a_simultaneous_pass_is_timed_on_perf_counter_whatever_the_shared_clock_counts(run_main, iotest_mod, monkeypatch):
+    # the same for a simultaneous pass: its writers' and readers' sync times are on perf_counter() too. The shared
+    # clock jumps an hour once the pass's workers have been started (the layout pass and the file generation
+    # benchmark start other processes before: worker() tells the timed pass's apart)
+    real_start, real_clock, jump = iotest_mod.start_processes, iotest_mod.shared_clock, [0]
+    monkeypatch.setattr(iotest_mod, "shared_clock", lambda: real_clock() + jump[0])
+
+    def start(processes):
+        # a started process drops its target
+        is_timed_pass = processes[0]._target is iotest_mod.worker
+        real_start(processes)
+        if is_timed_pass:
+            jump[0] += 3600
+
+    monkeypatch.setattr(iotest_mod, "start_processes", start)
+    result = run_main(["simultaneous"], process_count=2)
+    assert jump[0] == 3600
+    assert iotest_mod.total_failed_ops(result) == 0
+    assert 0 < result["totalTime"]["write"] < 60
     assert 0 < result["totalTime"]["read"] < 60
 
 
