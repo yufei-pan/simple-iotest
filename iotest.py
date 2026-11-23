@@ -2173,6 +2173,9 @@ def tune_simultaneous(options, tl, write_target, read_target):
 			if write_measured is None or read_measured is None:
 				tl.teeerror("Cannot measure sync bandwidth for simultaneous write/read")
 				sys.exit(1)
+			# the split the run used: its memory check may have cut the process count below the one asked for
+			pc = result['process_count']
+			write_count, read_count = result['mode_process_counts']['write'], result['mode_process_counts']['read']
 			write_status = throughput_status(write_measured, write_target) if write_target else None
 			read_status = throughput_status(read_measured, read_target) if read_target else None
 			tl.teeprint(f"tpt attempt {attempt}: pc={pc} ({write_count}w+{read_count}r) "
