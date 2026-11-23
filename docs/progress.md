@@ -8,7 +8,7 @@ Open work lives here and nowhere else (RULES, "Long work: the progress file"). E
 ## Open work
 
 ### simple-iotest 3.72.0 (no written plan; from the 3.71.0 reviews)
-- **`-pc 1 simultaneous`: an argument error (exit 2) instead of a traceback.** State: built on feat/3720 (1c0e6b3, 2026-11-23), in final review. The deferred entry in docs/limitations.md has the plan: parser.error after `-ts` when simultaneous and the process count is below 2; the memory cut keeps 2 processes for simultaneous. From: the 3.70.1 survey (a deferral, not asked).
+- **`-pc 1 simultaneous`: an argument error (exit 2) instead of a traceback.** State: built on feat/3720 (1c0e6b3, 2026-11-23); final review: fix first (on macOS with Python 3.10+ a pass's wall time came to count time asleep: measurements go back to perf_counter, only the start is handed on the shared clock), fix round f3720 running. The deferred entry in docs/limitations.md has the plan: parser.error after `-ts` when simultaneous and the process count is below 2; the memory cut keeps 2 processes for simultaneous. From: the 3.70.1 survey (a deferral, not asked).
 - **Tests the 3.71.0 reviews found missing (also untested in 3.70.1).** State: built on feat/3720 (125ce11), in final review. stat_file's failure tuple; comprehensive's wall-time split; the `-v` verb `Wrote`; the simultaneous `-v` lines ("in write mode", "finished", the late-start line). From: the 3.71.0 final review and second opinions.
 - **The "continue anyway in 15 seconds" message sleeps 16 s.** State: built on feat/3720, in final review; pick one number at the source (the message and the sleep), then the README. Also in 3.70.1. From: the 3.71.0 second opinions.
 
