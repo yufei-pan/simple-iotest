@@ -197,6 +197,17 @@ def test_memory_cut_keeps_two_simultaneous_processes(run_main, iotest_mod, monke
     assert "Reducing the number of processes to 2" in rec_tl.printed
 
 
+def test_memory_cut_says_nothing_when_the_floor_keeps_the_count(run_main, iotest_mod, monkeypatch, rec_tl):
+    # memory for 1.5 simultaneous workers, and the run asks for 2: it does not fit, but 2 is the fewest it can have
+    available = int(1.5 * iotest_mod.memory_per_process(["simultaneous"], 1024, 1))
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (available, 0))
+    result = run_main(["simultaneous"], process_count=2, tl=rec_tl)
+    assert result["process_count"] == 2
+    assert any(m.startswith("Estimated total memory usage is more than the all available memory") for m in rec_tl.printed)
+    assert not any("Reducing the number of processes" in m for m in rec_tl.printed)
+
+
 def test_read_worker_holds_only_its_read_buffer(iotest_mod, work_dir):
     iotest_mod.worker(2, 4 * MiB, str(work_dir), [], "write", "0", True, True, 0)
     # every file exists, so no random content is generated for recreating them

@@ -1657,8 +1657,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
 		# the first workers that fit: a smaller count runs the same first workers, on the same files.
 		# Simultaneous mode keeps a writer and a reader
-		process_count = fitting_process_count(worker_memory, phyFreeMemory + swapMemory, 2 if 'simultaneous' in modes else 1)
-		tl.teeerror(f"Reducing the number of processes to {process_count}")
+		fitting_count = fitting_process_count(worker_memory, phyFreeMemory + swapMemory, 2 if 'simultaneous' in modes else 1)
+		# the fewest a mode can run with may be the count it already has
+		if fitting_count < process_count:
+			process_count = fitting_count
+			tl.teeerror(f"Reducing the number of processes to {process_count}")
 	if 'simultaneous' in modes and simultaneous_write_count is not None and simultaneous_write_count > process_count - 1:
 		# the memory check may have cut process_count below the requested split
 		tl.teelog(f"Reducing simultaneous writers from {simultaneous_write_count} to {process_count - 1} to keep a reader", level='warning')
@@ -2443,7 +2446,9 @@ def climain():
 	modes = parse_modes(args.mode)
 	# after -ts, which can set the process count
 	if 'simultaneous' in modes and args.process_count < 2:
-		parser.error(f"simultaneous mode needs at least 2 processes (a writer and a reader), got -pc {args.process_count}")
+		# the count is -pc's, or what -ts worked out when -pc was not given
+		got = f", got -pc {args.process_count}" if process_count_specified else f"; -ts worked the process count out to {args.process_count} (give -pc, or a larger -ts)"
+		parser.error(f"simultaneous mode needs at least 2 processes (a writer and a reader){got}")
 	write_target = None
 	read_target = None
 	if args.write_target_throughput is not None:
