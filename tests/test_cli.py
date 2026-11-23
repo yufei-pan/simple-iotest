@@ -174,6 +174,18 @@ def test_cli_rejects_values_below_one(tmp_path, flag, value):
     assert not work.exists()
 
 
+@pytest.mark.parametrize("args", [["-pc", "1", "s"], ["-t", "1", "simultaneous"], ["-pc", "1", "w", "s"],
+                                  ["-fc", "1", "-ts", "1k", "s"]])
+def test_cli_rejects_simultaneous_with_one_process(tmp_path, args):
+    # an argument error before anything runs (the last case: -ts works out to one process)
+    work = tmp_path / "w"
+    proc = run_iotest(["-fs", "1k", "-d", str(work), "-nl", "-bt", "1", *args])
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "simultaneous mode needs at least 2 processes (a writer and a reader), got -pc 1" in proc.stderr
+    assert "Traceback" not in proc.stdout + proc.stderr
+    assert not work.exists()
+
+
 def test_cli_accepts_fractional_anomaly_threshold(tmp_path):
     work = tmp_path / "w"
     proc = run_iotest(["-fs", "1k", "-fc", "1", "-pc", "1", "-d", str(work), "-nl", "-nr", "-z", "-bt", "1",

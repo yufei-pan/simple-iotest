@@ -173,6 +173,17 @@ def test_memory_cut_keeps_at_least_one_simultaneous_reader(run_main, iotest_mod,
     assert result["mode_process_counts"] == {"write": 1, "read": 1}
 
 
+def test_memory_cut_keeps_two_simultaneous_processes(run_main, iotest_mod, monkeypatch, rec_tl):
+    # memory for 1.5 simultaneous workers: one process would leave no reader, so the cut keeps a writer and a reader
+    available = int(1.5 * iotest_mod.memory_per_process(["simultaneous"], 1024, 1))
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (available, 0))
+    result = run_main(["simultaneous"], process_count=4, tl=rec_tl)
+    assert result["process_count"] == 2
+    assert result["mode_process_counts"] == {"write": 1, "read": 1}
+    assert "Reducing the number of processes to 2" in rec_tl.printed
+
+
 def test_read_worker_holds_only_its_read_buffer(iotest_mod, work_dir):
     iotest_mod.worker(2, 4 * MiB, str(work_dir), [], "write", "0", True, True, 0)
     # every file exists, so no random content is generated for recreating them
@@ -403,6 +414,8 @@ def test_fitting_process_count(iotest_mod):
     assert fit([2, 1, 1, 1], 5) == 4
     assert fit([2, 1, 1, 1], 1) == 1
     assert fit([3, 3, 3], 8.9) == 2
+    assert fit([2, 1, 1, 1], 1, 2) == 2
+    assert fit([2, 1, 1, 1], 4, 2) == 3
 
 
 def test_startup_stats_every_worker_file_once(run_main, iotest_mod, work_dir, monkeypatch):

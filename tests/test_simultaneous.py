@@ -59,9 +59,11 @@ def test_simultaneous_after_batch_write_uses_role_worker_counts(run_main, iotest
     assert iotest_mod.measure_role_bandwidth(result, "write_2") == pytest.approx(expected)
 
 
-def test_simultaneous_requires_pc_ge_2(run_main):
+def test_simultaneous_requires_pc_ge_2(run_main, work_dir):
+    # before any pass runs: the write pass ahead of it writes nothing
     with pytest.raises(ValueError, match="process_count >= 2"):
-        run_main(["simultaneous"], process_count=1)
+        run_main(["write", "simultaneous"], process_count=1)
+    assert list(Path(work_dir).rglob("*.bin")) == []
 
 
 def test_tuning_attempt_readers_find_the_layout_of_a_larger_count(iotest_mod, work_dir, rec_tl):

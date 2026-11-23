@@ -1276,13 +1276,13 @@ def workers_memory(modes, buffer_size, file_count, recreates, timeline=False, re
 	figures = [memory_per_process(modes, buffer_size, file_count, flag, timeline, read_size) for flag in (False, True)]
 	return [figures[1 if flag else 0] for flag in recreates]
 
-def fitting_process_count(worker_memory, available):
-	# how many of the first workers fit in the available memory together, at least one
+def fitting_process_count(worker_memory, available, fewest=1):
+	# how many of the first workers fit in the available memory together, at least fewest
 	total = 0
 	for count, memory in enumerate(worker_memory):
 		total += memory
 		if total > available:
-			return max(count, 1)
+			return max(count, fewest)
 	return len(worker_memory)
 
 def read_meminfo():
@@ -1591,6 +1591,9 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
 	if not directories:
 		raise ValueError("At least one output directory must be provided")
+	# before any pass runs; the command refuses it as an invalid argument
+	if 'simultaneous' in modes and process_count < 2:
+		raise ValueError("simultaneous mode requires process_count >= 2")
 	for output_dir in directories:
 		os.makedirs(output_dir, exist_ok=True)
 	primary_directory = directories[0]
@@ -1624,10 +1627,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		tl.teeerror(f"Physical available memory: {format_bytes(phyFreeMemory)}B")
 		tl.teeerror(f"Swap available memory: {format_bytes(swapMemory)}B")
 		tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
-		# the first workers that fit: a smaller count runs the same first workers, on the same files
-		process_count = fitting_process_count(worker_memory, phyFreeMemory + swapMemory)
+		# the first workers that fit: a smaller count runs the same first workers, on the same files.
+		# Simultaneous mode keeps a writer and a reader
+		process_count = fitting_process_count(worker_memory, phyFreeMemory + swapMemory, 2 if 'simultaneous' in modes else 1)
 		tl.teeerror(f"Reducing the number of processes to {process_count}")
-	if 'simultaneous' in modes and simultaneous_write_count is not None and simultaneous_write_count > process_count - 1 >= 1:
+	if 'simultaneous' in modes and simultaneous_write_count is not None and simultaneous_write_count > process_count - 1:
 		# the memory check may have cut process_count below the requested split
 		tl.teelog(f"Reducing simultaneous writers from {simultaneous_write_count} to {process_count - 1} to keep a reader", level='warning')
 		simultaneous_write_count = process_count - 1
@@ -1727,8 +1731,6 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				continue
 			pass_index += 1
 			if mode == 'simultaneous':
-				if process_count < 2:
-					raise ValueError("simultaneous mode requires process_count >= 2")
 				if simultaneous_write_count is not None:
 					write_count = simultaneous_write_count
 					read_count = process_count - write_count
@@ -2408,6 +2410,9 @@ def climain():
 		parser.error(f"--verify requires a file size of at least 28 bytes, got {args.file_size}")
 
 	modes = parse_modes(args.mode)
+	# after -ts, which can set the process count
+	if 'simultaneous' in modes and args.process_count < 2:
+		parser.error(f"simultaneous mode needs at least 2 processes (a writer and a reader), got -pc {args.process_count}")
 	write_target = None
 	read_target = None
 	if args.write_target_throughput is not None:
