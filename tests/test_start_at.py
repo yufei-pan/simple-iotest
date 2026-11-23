@@ -182,6 +182,12 @@ def test_a_pass_is_timed_on_perf_counter_whatever_the_shared_clock_counts(run_ma
     assert 0 < result["totalTime"]["read"] < 60
 
 
+def test_shared_clock_is_perf_counter_from_python_3_10(iotest_mod):
+    # from 3.10 perf_counter() is one system-wide clock on every platform, so the start is handed on the clock every
+    # measurement uses; the kernel's CLOCK_MONOTONIC would count the time a Mac sleeps, perf_counter() does not
+    assert (iotest_mod.shared_clock is time.perf_counter) == (sys.version_info >= (3, 10))
+
+
 def test_shared_clock_without_clock_gettime_is_one_every_process_reads_alike():
     # python.org's macOS installers of 3.7 and 3.8 have no time.clock_gettime, and there monotonic() counts from the
     # process's start (as perf_counter() does before 3.10): the wall clock is the one every process reads alike

@@ -593,16 +593,17 @@ def worker_color_log(color, msg, quiet=False):
 
 # The clock the parent gives workers their start time on, one that every process of the host reads alike. Only the
 # hand-over is on it: every time iotest measures is on perf_counter(), which counts no time asleep (the kernel's
-# clock does, on macOS) and has no steps. perf_counter() is not shared on macOS and Windows before Python 3.10, nor
-# is monotonic() on macOS: both counted from the process's own first call there, so a spawned worker read its
-# parent's start time as that parent's age ahead of it. CLOCK_MONOTONIC is the kernel's (Linux, macOS, the BSDs).
-# Not every build has it: Windows never does, and python.org's macOS installers of 3.7 and 3.8 do not (built for
-# macOS 10.9; bugs.python.org issue 39203). Then perf_counter() from Python 3.10, Windows's monotonic() before
-# (GetTickCount64, in 15.6 ms steps), and anywhere else the wall clock, which can step but is shared
-if hasattr(time, 'clock_gettime') and hasattr(time, 'CLOCK_MONOTONIC'):
-	shared_clock = functools.partial(time.clock_gettime, time.CLOCK_MONOTONIC)
-elif sys.version_info >= (3, 10):
+# clock does, on macOS) and has no steps. From Python 3.10 that is perf_counter() itself, one system-wide clock on
+# Linux, macOS and Windows. Before 3.10, perf_counter() counted from the process's own first call on macOS and
+# Windows (and monotonic() on macOS), so a spawned worker read its parent's start time as that parent's age ahead
+# of it: there it is CLOCK_MONOTONIC, the kernel's (Linux, macOS, the BSDs). Not every build has it: Windows never
+# does, nor python.org's macOS installers of 3.7 and 3.8 (built for macOS 10.9; bugs.python.org issue 39203). Then
+# Windows's monotonic() (GetTickCount64, in 15.6 ms steps), and anywhere else the wall clock, which can step but
+# is shared
+if sys.version_info >= (3, 10):
 	shared_clock = time.perf_counter
+elif hasattr(time, 'clock_gettime') and hasattr(time, 'CLOCK_MONOTONIC'):
+	shared_clock = functools.partial(time.clock_gettime, time.CLOCK_MONOTONIC)
 elif sys.platform == 'win32':
 	shared_clock = time.monotonic
 else:
