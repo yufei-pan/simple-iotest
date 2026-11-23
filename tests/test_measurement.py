@@ -184,6 +184,16 @@ def test_comprehensive_sections_carry_the_estimate_note(run_main, rec_tl):
     assert note + "\n" + "-" * 80 in text
 
 
+def test_comprehensive_splits_the_pass_time_by_op_time(run_main):
+    # write, move, stat and read share the pass's wall time in proportion to their op time
+    result = run_main(["comprehensive"], file_count=4)
+    keys = ("write", "move", "stat", "read")
+    op_time = {key: sum(result["outResults"][key]) for key in keys}
+    pass_time = sum(result["totalTime"][key] for key in keys)
+    for key in keys:
+        assert result["totalTime"][key] == pytest.approx(pass_time * op_time[key] / sum(op_time.values()))
+
+
 def test_plain_write_pass_has_no_estimate_note(run_main, rec_tl):
     result = run_main(["write"], tl=rec_tl)
     assert result["sync_estimated"] == {"write": False}
@@ -352,6 +362,38 @@ def test_only_passes_that_may_write_make_a_write_call_per_file(iotest_mod, work_
     monkeypatch.setattr(iotest_mod, "functools", types.SimpleNamespace(partial=partial))
     iotest_mod.worker(3, 1024, str(work_dir), [], mode, "0000", True, True, 0)
     assert made == ([0, 1, 2] if writes else [])
+
+
+@pytest.mark.parametrize("mode,verb", [("write", "Wrote"), ("read", "Read"), ("index", "Indexed"),
+                                       ("meta_stat", "Stat"), ("meta_unlink", "Unlink")])
+def test_verbose_workers_name_each_op(iotest_mod, work_dir, capsys, mode, verb):
+    # read needs the files, and the meta passes the create's
+    if mode == "read":
+        iotest_mod.worker(3, 1024, str(work_dir), [], "write", "0000", True, True, 0)
+    if mode.startswith("meta_"):
+        iotest_mod.worker(3, 1024, str(work_dir), [], "meta_create", "0000", True, True, 0)
+        if mode == "meta_unlink":
+            iotest_mod.worker(3, 1024, str(work_dir), [], "meta_stat", "0000", True, True, 0)
+    capsys.readouterr()
+    iotest_mod.worker(3, 1024, str(work_dir), [], mode, "0000", False, True, 0)
+    lines = [line for line in capsys.readouterr().out.splitlines() if "\tFile " in line]
+    assert len(lines) == 3
+    assert all(re.search(r"\t%s\t\d+\.\d+(e-\d+)? s" % verb, line) for line in lines), lines
+
+
+@pytest.mark.parametrize("role,verb", [("write", "Wrote"), ("read", "Read")])
+def test_verbose_simultaneous_workers_log_their_mode_ops_lateness_and_end(iotest_mod, work_dir, capsys, role, verb):
+    iotest_mod.layout_read_worker(3, 1024, str(work_dir), "t", "0000", True, True)
+    capsys.readouterr()
+    late = []
+    iotest_mod.worker(3, 1024, str(work_dir), [], role, "0000", False, True, iotest_mod.shared_clock() - 5,
+        late_starts=late, simultaneous_run_id="t")
+    lines = capsys.readouterr().out.splitlines()
+    assert re.search(r"Worker 0000 scheduled to start at -\d+\.\d{4} later in %s mode\.\x1b" % role, lines[0])
+    assert len(late) == 1 and late[0] >= 5
+    assert len([line for line in lines if "Worker 0000 started late, expected start time " in line]) == 1
+    assert len([line for line in lines if "\tFile " in line and "\t%s\t" % verb in line]) == 3
+    assert lines[-1].endswith("Worker 0000 finished.\x1b[0m")
 
 
 def test_verbose_workers_log_each_op_as_before(iotest_mod, work_dir, capsys):

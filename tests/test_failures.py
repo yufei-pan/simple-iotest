@@ -1,4 +1,6 @@
 import math
+import os
+import sys
 
 import pytest
 
@@ -75,6 +77,26 @@ def test_comprehensive_failures_stay_on_their_own_op(run_main, work_dir):
     # then reading the renamed directory fails
     assert failed == {"write": 1, "move": 0, "stat": 0, "read": 1}
     assert all(math.isfinite(t) for t in result["totalTime"].values())
+
+
+def test_a_failed_stat_fails_its_op_and_the_comprehensive_worker_goes_on(iotest_mod, work_dir, monkeypatch):
+    # stat_file() keeps its three-part result when the stat fails, which the worker reads the size from
+    real_stat = os.stat
+
+    def stat(path, *args, **kwargs):
+        # only stat_file's own call fails; read_file's size check still finds the file
+        if sys._getframe(1).f_code.co_name == "stat_file":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(iotest_mod.os, "stat", stat)
+    results = []
+    iotest_mod.worker(2, 1024, str(work_dir), results, "comprehensive", "0", True, True, 0)
+    # each file's write, move, stat and read, in turn
+    samples = list(iotest_mod.result_samples(results))
+    assert len(samples) == 8
+    assert all(isinstance(s, str) and "Permission denied" in s for s in samples[2::4])
+    assert not any(isinstance(s, str) for position, s in enumerate(samples) if position % 4 != 2)
 
 
 def test_simultaneous_write_failure_is_counted(run_main, work_dir):
