@@ -39,8 +39,8 @@ try:
 except ImportError:
 	numpy_available = False
 
-version = '3.71.0'
-COMMIT_DATE = '2026-11-16'
+version = '3.72.0'
+COMMIT_DATE = '2026-11-23'
 __version__ = version
 
 # --------------------------------
@@ -591,6 +591,28 @@ def worker_color_log(color, msg, quiet=False):
 	r, g, b = color
 	worker_log(f'\033[38;2;{r};{g};{b}m{msg}\033[0m', quiet=quiet)
 
+# The clock the parent gives workers their start time on, one that every process of the host reads alike. Only the
+# hand-over is on it: every time iotest measures is on perf_counter(), which counts no time asleep (the kernel's
+# clock does, on macOS) and has no steps. From Python 3.10 that is perf_counter() itself, one system-wide clock on
+# Linux, macOS and Windows. Before 3.10, perf_counter() counted from the process's own first call on macOS and
+# Windows (and monotonic() on macOS), so a spawned worker read its parent's start time as that parent's age ahead
+# of it: there it is CLOCK_MONOTONIC, the kernel's (Linux, macOS, the BSDs). Not every build has it: Windows never
+# does, nor python.org's macOS installers of 3.7 and 3.8 (built for macOS 10.9; bugs.python.org issue 39203). Then
+# Windows's monotonic() (GetTickCount64, in 15.6 ms steps), and anywhere else the wall clock, which can step but
+# is shared
+if sys.version_info >= (3, 10):
+	shared_clock = time.perf_counter
+elif hasattr(time, 'clock_gettime') and hasattr(time, 'CLOCK_MONOTONIC'):
+	shared_clock = functools.partial(time.clock_gettime, time.CLOCK_MONOTONIC)
+elif sys.platform == 'win32':
+	shared_clock = time.monotonic
+else:
+	shared_clock = time.time
+
+def own_clock(shared_time):
+	# a time on shared_clock(), moved onto this process's perf_counter()
+	return time.perf_counter() + (shared_time - shared_clock())
+
 def wait_for_barrier(start_time):
 	# one long sleep until about 1 s before the barrier, then the 1 ms loop for the precise start
 	ahead = start_time - time.perf_counter() - 1
@@ -605,7 +627,9 @@ OP_VERBS = {'write': 'Wrote', 'read': 'Read', 'index': 'Indexed', 'create': 'Cre
 def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False, late_starts=None, progress_to_stderr=False, timeline=None, block_size=None, verify=False, simultaneous_run_id=None):
 	# every timed pass's worker; with simultaneous_run_id, a simultaneous pass's writer or reader (mode write or
 	# read) on its own files in that run's tree. The ops append to a list as they go; it becomes one compact
-	# record after the last
+	# record after the last. thread_start_time, the pass's start, comes on shared_clock(): from here on it is on this
+	# process's perf_counter(), like the ops
+	thread_start_time = own_clock(thread_start_time)
 	local_results = []
 	local_kinds = [] if mode == 'random' else None
 	# only with --timeline; without it the loop below does no timeline work beyond a None check
@@ -1276,13 +1300,17 @@ def workers_memory(modes, buffer_size, file_count, recreates, timeline=False, re
 	figures = [memory_per_process(modes, buffer_size, file_count, flag, timeline, read_size) for flag in (False, True)]
 	return [figures[1 if flag else 0] for flag in recreates]
 
-def fitting_process_count(worker_memory, available):
-	# how many of the first workers fit in the available memory together, at least one
+# seconds the run waits after warning that it may push the system into swap, to read the warning and press Ctrl+C:
+# what the warning has said since it came in (2025-02), and the README too (the sleep was 16 s until 3.72.0)
+MEMORY_WARNING_PAUSE = 15
+
+def fitting_process_count(worker_memory, available, fewest=1):
+	# how many of the first workers fit in the available memory together, at least fewest
 	total = 0
 	for count, memory in enumerate(worker_memory):
 		total += memory
 		if total > available:
-			return max(count, 1)
+			return max(count, fewest)
 	return len(worker_memory)
 
 def read_meminfo():
@@ -1532,8 +1560,9 @@ def write_json_summary(path, summary, tl, report_errors):
 
 def first_pass_start(start_at, process_start_delay, tl, start_notes, start_late):
 	# the synchronized pass waits for start_at; if too little time is left for the
-	# workers to prime, it starts after the usual delay instead and says how late
-	now = time.perf_counter()
+	# workers to prime, it starts after the usual delay instead and says how late. On shared_clock(), like every
+	# pass's start
+	now = shared_clock()
 	remaining = start_at - time.time()
 	start_notes.append(f"Synchronized start at {datetime.datetime.fromtimestamp(start_at).astimezone().isoformat(timespec='seconds')} (--start_at)")
 	if remaining >= process_start_delay:
@@ -1591,6 +1620,9 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		tl = Tee_Logger.teeLogger(suppressPrintout=quiet)
 	if not directories:
 		raise ValueError("At least one output directory must be provided")
+	# before any pass runs; the command refuses it as an invalid argument
+	if 'simultaneous' in modes and process_count < 2:
+		raise ValueError("simultaneous mode requires process_count >= 2")
 	for output_dir in directories:
 		os.makedirs(output_dir, exist_ok=True)
 	primary_directory = directories[0]
@@ -1624,15 +1656,19 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		tl.teeerror(f"Physical available memory: {format_bytes(phyFreeMemory)}B")
 		tl.teeerror(f"Swap available memory: {format_bytes(swapMemory)}B")
 		tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
-		# the first workers that fit: a smaller count runs the same first workers, on the same files
-		process_count = fitting_process_count(worker_memory, phyFreeMemory + swapMemory)
-		tl.teeerror(f"Reducing the number of processes to {process_count}")
-	if 'simultaneous' in modes and simultaneous_write_count is not None and simultaneous_write_count > process_count - 1 >= 1:
+		# the first workers that fit: a smaller count runs the same first workers, on the same files.
+		# Simultaneous mode keeps a writer and a reader
+		fitting_count = fitting_process_count(worker_memory, phyFreeMemory + swapMemory, 2 if 'simultaneous' in modes else 1)
+		# the fewest a mode can run with may be the count it already has
+		if fitting_count < process_count:
+			process_count = fitting_count
+			tl.teeerror(f"Reducing the number of processes to {process_count}")
+	if 'simultaneous' in modes and simultaneous_write_count is not None and simultaneous_write_count > process_count - 1:
 		# the memory check may have cut process_count below the requested split
 		tl.teelog(f"Reducing simultaneous writers from {simultaneous_write_count} to {process_count - 1} to keep a reader", level='warning')
 		simultaneous_write_count = process_count - 1
 	estimatedTotalMemory = sum(worker_memory[:process_count])
-	# the disk check needs the final process_count, but runs before the 16 s memory pause
+	# the disk check needs the final process_count, but runs before the memory pause
 	needed, cow_extra = space_needed(modes, file_size, file_count, process_count, directories,
 		simultaneous_write_count=simultaneous_write_count, layout_worker_count=simultaneous_layout_workers,
 		skip_layout=simultaneous_skip_layout, mountinfo_lines=mountinfo, scan=scan)
@@ -1648,8 +1684,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		tl.teeerror(f"Available memory: {format_bytes(phyFreeMemory)}B")
 		tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
 		tl.teelog("If continuing, iotest will likely put very heavy pressure on swap memory and may lead to system crash.",level='critical')
-		tl.teelog("Exit now (press Ctrl+C) or iotest will continue anyway in 15 seconds...",level='critical')
-		time.sleep(16)
+		tl.teelog(f"Exit now (press Ctrl+C) or iotest will continue anyway in {MEMORY_WARNING_PAUSE} seconds...",level='critical')
+		time.sleep(MEMORY_WARNING_PAUSE)
 		tl.teelog("Warning! Continuing anyway... ",level='warning')
 	with Manager() as manager:
 		# bench mark file generation performance first
@@ -1727,8 +1763,6 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				continue
 			pass_index += 1
 			if mode == 'simultaneous':
-				if process_count < 2:
-					raise ValueError("simultaneous mode requires process_count >= 2")
 				if simultaneous_write_count is not None:
 					write_count = simultaneous_write_count
 					read_count = process_count - write_count
@@ -1760,7 +1794,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 						thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes, start_late)
 						sync_start_at = None
 					else:
-						thread_start_time = time.perf_counter() + processStartDelay
+						thread_start_time = shared_clock() + processStartDelay
 					tl.teeprint(f"Simultaneous mode: {write_count} writers + {read_count} readers...")
 					def role_workers(role, count, role_results, role_late):
 						# the first workers of the role: tuning attempts at smaller counts overwrite the same writer
@@ -1770,7 +1804,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 							role_late, False, pass_timeline, block_size, verify, run_id)) for counter in range(count)]
 					write_processes = role_workers('write', write_count, write_results, write_late)
 					read_processes = role_workers('read', read_count, read_results, read_late)
-					totalStartTime = thread_start_time
+					totalStartTime = own_clock(thread_start_time)
 					start_processes(write_processes + read_processes)
 					for p in write_processes:
 						p.join()
@@ -1800,18 +1834,18 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes, start_late)
 				sync_start_at = None
 			else:
-				thread_start_time = time.perf_counter() + processStartDelay
+				thread_start_time = shared_clock() + processStartDelay
 			for counter in range(process_count):
 				assigned_directory = directories[counter % len(directories)]
 				recreates = pass_recreates is not None and pass_recreates[counter]
 				counter = worker_counter_name(counter)
 				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, recreates, late, json_to_stdout, pass_timeline, block_size, verify))
 				processes.append(p)
-			totalStartTime = thread_start_time
+			totalStartTime = own_clock(thread_start_time)
 			start_processes(processes)
 			for p in processes:
 				p.join()
-			totalEndTime =  time.perf_counter() - totalStartTime
+			totalEndTime = time.perf_counter() - totalStartTime
 			dead_errors = dead_worker_errors(processes, file_count)
 			processes.clear()
 			# one bulk fetch per list: iterating a proxy costs a round trip per item
@@ -2143,6 +2177,9 @@ def tune_simultaneous(options, tl, write_target, read_target):
 			if write_measured is None or read_measured is None:
 				tl.teeerror("Cannot measure sync bandwidth for simultaneous write/read")
 				sys.exit(1)
+			# the split the run used: its memory check may have cut the process count below the one asked for
+			pc = result['process_count']
+			write_count, read_count = result['mode_process_counts']['write'], result['mode_process_counts']['read']
 			write_status = throughput_status(write_measured, write_target) if write_target else None
 			read_status = throughput_status(read_measured, read_target) if read_target else None
 			tl.teeprint(f"tpt attempt {attempt}: pc={pc} ({write_count}w+{read_count}r) "
@@ -2408,6 +2445,11 @@ def climain():
 		parser.error(f"--verify requires a file size of at least 28 bytes, got {args.file_size}")
 
 	modes = parse_modes(args.mode)
+	# after -ts, which can set the process count
+	if 'simultaneous' in modes and args.process_count < 2:
+		# the count is -pc's, or what -ts worked out when -pc was not given
+		got = f", got -pc {args.process_count}" if process_count_specified else f"; -ts worked the process count out to {args.process_count} (give -pc, or a larger -ts)"
+		parser.error(f"simultaneous mode needs at least 2 processes (a writer and a reader){got}")
 	write_target = None
 	read_target = None
 	if args.write_target_throughput is not None:

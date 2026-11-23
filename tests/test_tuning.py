@@ -246,13 +246,23 @@ def _call_simul(iotest_mod, work_dir, rec_tl, write_target, read_target, process
     return iotest_mod.tune_simultaneous(options, rec_tl, write_target, read_target)
 
 
-def _stub_simul(iotest_mod, monkeypatch, measure, process_count=2):
-    """Stub simultaneous tuning I/O; `measure` is the fake bandwidth function."""
+def _simul_result(process_count, write_count, limit=None):
+    """What a simultaneous attempt returns: it runs as asked, or with `limit` processes at most (a memory cut keeps
+    a reader, as run_iotest() does)."""
+    used = process_count if limit is None else min(process_count, limit)
+    writers = min(used // 2 if write_count is None else write_count, used - 1)
+    return {"process_count": used, "mode_process_counts": {"write": writers, "read": used - writers},
+            "outResults": {}, "totalTime": {}}
+
+
+def _stub_simul(iotest_mod, monkeypatch, measure, process_count=None):
+    """Stub simultaneous tuning I/O; `measure` is the fake bandwidth function, `process_count` the most processes an
+    attempt can run with (no limit by default)."""
     monkeypatch.setattr(iotest_mod, "run_simultaneous_layout", lambda *a, **k: None)
     monkeypatch.setattr(
         iotest_mod,
         "_run_tuning_main",
-        lambda *a, **k: {"process_count": process_count, "outResults": {}, "totalTime": {}},
+        lambda options, tl, pc, write_count=None, simultaneous_session=None: _simul_result(pc, write_count, process_count),
     )
     if callable(measure):
         monkeypatch.setattr(iotest_mod, "measure_role_bandwidth", measure)
@@ -332,7 +342,7 @@ def test_simul_tuning_below_target_first_moves_a_worker_to_the_target_role(iotes
 
     def run(options, tl, process_count, simultaneous_write_count=None, simultaneous_session=None):
         attempts.append((process_count, simultaneous_write_count))
-        return {"process_count": process_count, "outResults": {}, "totalTime": {}}
+        return _simul_result(process_count, simultaneous_write_count)
 
     monkeypatch.setattr(iotest_mod, "_run_tuning_main", run)
     rc = _call_simul(iotest_mod, work_dir, rec_tl, 1000 if role == "write" else None, 1000 if role == "read" else None,
@@ -383,6 +393,22 @@ def test_simul_tuning_asymmetric_above_ok_finalizes(iotest_mod, work_dir, rec_tl
     rc = _call_simul(iotest_mod, work_dir, rec_tl, 1000, 2000)
     assert rc == 0
     assert finalized
+
+
+def test_simul_tuning_goes_on_from_the_split_the_run_used(iotest_mod, work_dir, rec_tl, monkeypatch):
+    # a real run with memory for 2.5 simultaneous workers, asked for 4: it keeps a writer and a reader. A write
+    # target far below what that measures is accepted at once, at the 1 + 1 that ran, not after tuning splits no
+    # run used
+    available = int(2.5 * iotest_mod.memory_per_process(["simultaneous"], 1024, 1))
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (available, 0))
+    finalized = []
+    monkeypatch.setattr(iotest_mod, "_finalize_tuning_run", lambda *a, **k: finalized.append(a))
+    assert _call_simul(iotest_mod, work_dir, rec_tl, 1, None, process_count=4) == 0
+    (attempt,) = [m for m in rec_tl.printed if m.startswith("tpt attempt")]
+    assert "pc=2 (1w+1r)" in attempt
+    ((options, tl, pc, writers),) = finalized
+    assert (pc, writers) == (2, 1)
 
 
 def test_simul_tuning_cannot_measure_exits(iotest_mod, work_dir, rec_tl, monkeypatch):

@@ -243,14 +243,14 @@ def test_free_space_is_checked_per_pool(run_main, tmp_path, iotest_mod, monkeypa
 
 
 def test_disk_check_comes_before_the_memory_pause(run_main, iotest_mod, monkeypatch):
-    # little RAM but plenty of swap: no process cut, but the 90% warning pauses 16 s
+    # little RAM but plenty of swap: no process cut, but the 90% warning pauses
     sleeps = []
     monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: sleeps.append(s))
     monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (1000, 10**9))
     fake_free(iotest_mod, monkeypatch, 0)
     with pytest.raises(SystemExit):
         run_main(["write"])
-    assert 16 not in sleeps
+    assert iotest_mod.MEMORY_WARNING_PAUSE not in sleeps
 
 
 def test_simultaneous_attempts_rely_on_the_tuners_upfront_check(iotest_mod, work_dir, rec_tl, monkeypatch):

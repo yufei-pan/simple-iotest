@@ -174,6 +174,31 @@ def test_cli_rejects_values_below_one(tmp_path, flag, value):
     assert not work.exists()
 
 
+ONE_PROCESS = "simultaneous mode needs at least 2 processes (a writer and a reader)"
+
+
+@pytest.mark.parametrize("args", [["-pc", "1", "s"], ["-t", "1", "simultaneous"], ["-pc", "1", "w", "s"]])
+def test_cli_rejects_simultaneous_with_one_process(tmp_path, args):
+    # an argument error before anything runs
+    work = tmp_path / "w"
+    proc = run_iotest(["-fs", "1k", "-d", str(work), "-nl", "-bt", "1", *args])
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert f"{ONE_PROCESS}, got -pc 1" in proc.stderr
+    assert "Traceback" not in proc.stdout + proc.stderr
+    assert not work.exists()
+
+
+def test_cli_names_ts_when_it_worked_out_one_process(tmp_path):
+    # the user never typed -pc: the error says what set the count
+    work = tmp_path / "w"
+    proc = run_iotest(["-fs", "1k", "-fc", "1", "-ts", "1k", "-d", str(work), "-nl", "-bt", "1", "s"])
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert f"{ONE_PROCESS}; -ts worked the process count out to 1" in proc.stderr
+    assert "got -pc" not in proc.stderr
+    assert "Traceback" not in proc.stdout + proc.stderr
+    assert not work.exists()
+
+
 def test_cli_accepts_fractional_anomaly_threshold(tmp_path):
     work = tmp_path / "w"
     proc = run_iotest(["-fs", "1k", "-fc", "1", "-pc", "1", "-d", str(work), "-nl", "-nr", "-z", "-bt", "1",

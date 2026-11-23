@@ -1,4 +1,5 @@
 import os
+import re
 import tracemalloc
 
 import pytest
@@ -173,6 +174,40 @@ def test_memory_cut_keeps_at_least_one_simultaneous_reader(run_main, iotest_mod,
     assert result["mode_process_counts"] == {"write": 1, "read": 1}
 
 
+def test_memory_warning_waits_as_long_as_it_says(run_main, iotest_mod, monkeypatch, rec_tl):
+    # little RAM but plenty of swap: no process cut, but the 90% warning pauses before the run
+    sleeps = []
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (1000, 10**9))
+    run_main(["write"], tl=rec_tl)
+    (line,) = [m for m in rec_tl.logged if "continue anyway in" in m]
+    said = int(re.search(r"continue anyway in (\d+) seconds", line).group(1))
+    # the parent's first sleep is the pause (forked workers' barrier sleeps land in their own copy of the list)
+    assert sleeps[0] == said == 15
+
+
+def test_memory_cut_keeps_two_simultaneous_processes(run_main, iotest_mod, monkeypatch, rec_tl):
+    # memory for 1.5 simultaneous workers: one process would leave no reader, so the cut keeps a writer and a reader
+    available = int(1.5 * iotest_mod.memory_per_process(["simultaneous"], 1024, 1))
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (available, 0))
+    result = run_main(["simultaneous"], process_count=4, tl=rec_tl)
+    assert result["process_count"] == 2
+    assert result["mode_process_counts"] == {"write": 1, "read": 1}
+    assert "Reducing the number of processes to 2" in rec_tl.printed
+
+
+def test_memory_cut_says_nothing_when_the_floor_keeps_the_count(run_main, iotest_mod, monkeypatch, rec_tl):
+    # memory for 1.5 simultaneous workers, and the run asks for 2: it does not fit, but 2 is the fewest it can have
+    available = int(1.5 * iotest_mod.memory_per_process(["simultaneous"], 1024, 1))
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (available, 0))
+    result = run_main(["simultaneous"], process_count=2, tl=rec_tl)
+    assert result["process_count"] == 2
+    assert any(m.startswith("Estimated total memory usage is more than the all available memory") for m in rec_tl.printed)
+    assert not any("Reducing the number of processes" in m for m in rec_tl.printed)
+
+
 def test_read_worker_holds_only_its_read_buffer(iotest_mod, work_dir):
     iotest_mod.worker(2, 4 * MiB, str(work_dir), [], "write", "0", True, True, 0)
     # every file exists, so no random content is generated for recreating them
@@ -225,10 +260,11 @@ def test_read_worker_that_will_recreate_generates_before_the_start_barrier(iotes
     real = iotest_mod.make_file_content
     monkeypatch.setattr(iotest_mod, "make_file_content",
         lambda *a, **k: made_at.append(iotest_mod.time.perf_counter()) or real(*a, **k))
-    start = iotest_mod.time.perf_counter() + 0.3
+    # the start goes in on shared_clock(); the worker's own clock is perf_counter()
+    start, local_start = iotest_mod.shared_clock() + 0.3, iotest_mod.time.perf_counter() + 0.3
     iotest_mod.worker(1, 4096, str(work_dir), [], "read", "0", True, True, start, False, True)
     assert len(made_at) == 1
-    assert made_at[0] < start
+    assert made_at[0] < local_start
 
 
 def test_memory_cut_keeps_the_files_of_the_first_workers(run_main, iotest_mod, monkeypatch):
@@ -403,6 +439,8 @@ def test_fitting_process_count(iotest_mod):
     assert fit([2, 1, 1, 1], 5) == 4
     assert fit([2, 1, 1, 1], 1) == 1
     assert fit([3, 3, 3], 8.9) == 2
+    assert fit([2, 1, 1, 1], 1, 2) == 2
+    assert fit([2, 1, 1, 1], 4, 2) == 3
 
 
 def test_startup_stats_every_worker_file_once(run_main, iotest_mod, work_dir, monkeypatch):

@@ -71,14 +71,14 @@ def test_f_nocache_is_skipped_without_the_constant(iotest_mod, tmp_path, monkeyp
 
 def test_late_worker_is_recorded(iotest_mod, work_dir):
     late = []
-    start = iotest_mod.time.perf_counter() - 5
+    start = iotest_mod.shared_clock() - 5
     iotest_mod.worker(1, 1024, str(work_dir), [], "write", "0", True, True, start, False, False, late)
     assert len(late) == 1 and late[0] >= 5
 
 
 def test_punctual_worker_is_not_recorded(iotest_mod, work_dir):
     late = []
-    start = iotest_mod.time.perf_counter() + 0.3
+    start = iotest_mod.shared_clock() + 0.3
     iotest_mod.worker(1, 1024, str(work_dir), [], "write", "0", True, True, start, False, False, late)
     assert late == []
 
@@ -184,6 +184,29 @@ def test_comprehensive_sections_carry_the_estimate_note(run_main, rec_tl):
     assert note + "\n" + "-" * 80 in text
 
 
+def test_comprehensive_splits_the_pass_time_by_op_time(run_main, iotest_mod, monkeypatch):
+    # write, move, stat and read share the pass's wall time in proportion to their op time. The parent's clock jumps
+    # 1000 s once a pass's workers have been started, so the wall time is 1000 s plus what the pass really took,
+    # which is less than the whole run took
+    real_start, real_perf, jump = iotest_mod.start_processes, iotest_mod.time.perf_counter, [0]
+    monkeypatch.setattr(iotest_mod.time, "perf_counter", lambda: real_perf() + jump[0])
+
+    def start(processes):
+        real_start(processes)
+        jump[0] += 1000
+
+    monkeypatch.setattr(iotest_mod, "start_processes", start)
+    began = real_perf()
+    result = run_main(["comprehensive"], file_count=4)
+    run_time = real_perf() - began
+    keys = ("write", "move", "stat", "read")
+    op_time = {key: sum(result["outResults"][key]) for key in keys}
+    pass_time = sum(result["totalTime"][key] for key in keys)
+    assert 1000 <= pass_time <= 1000 + run_time
+    for key in keys:
+        assert result["totalTime"][key] == pytest.approx(pass_time * op_time[key] / sum(op_time.values()))
+
+
 def test_plain_write_pass_has_no_estimate_note(run_main, rec_tl):
     result = run_main(["write"], tl=rec_tl)
     assert result["sync_estimated"] == {"write": False}
@@ -281,11 +304,12 @@ def test_simultaneous_reader_allocates_its_buffer_before_the_start_barrier(iotes
         return real(*args)
 
     monkeypatch.setattr(iotest_mod, "bytearray", spy, raising=False)
-    start = iotest_mod.time.perf_counter() + 0.3
+    # the start goes in on shared_clock(); the worker's own clock is perf_counter()
+    start, local_start = iotest_mod.shared_clock() + 0.3, iotest_mod.time.perf_counter() + 0.3
     results = []
     iotest_mod.worker(1, 4096, str(work_dir), results, "read", iotest_mod.worker_counter_name(0), True, True, start,
         simultaneous_run_id="t")
-    assert len(made_at) == 1 and made_at[0] < start
+    assert len(made_at) == 1 and made_at[0] < local_start
     assert not [s for s in iotest_mod.result_samples(results) if isinstance(s, str)]
 
 
@@ -351,6 +375,38 @@ def test_only_passes_that_may_write_make_a_write_call_per_file(iotest_mod, work_
     monkeypatch.setattr(iotest_mod, "functools", types.SimpleNamespace(partial=partial))
     iotest_mod.worker(3, 1024, str(work_dir), [], mode, "0000", True, True, 0)
     assert made == ([0, 1, 2] if writes else [])
+
+
+@pytest.mark.parametrize("mode,verb", [("write", "Wrote"), ("read", "Read"), ("index", "Indexed"),
+                                       ("meta_stat", "Stat"), ("meta_unlink", "Unlink")])
+def test_verbose_workers_name_each_op(iotest_mod, work_dir, capsys, mode, verb):
+    # read needs the files, and the meta passes the create's
+    if mode == "read":
+        iotest_mod.worker(3, 1024, str(work_dir), [], "write", "0000", True, True, 0)
+    if mode.startswith("meta_"):
+        iotest_mod.worker(3, 1024, str(work_dir), [], "meta_create", "0000", True, True, 0)
+        if mode == "meta_unlink":
+            iotest_mod.worker(3, 1024, str(work_dir), [], "meta_stat", "0000", True, True, 0)
+    capsys.readouterr()
+    iotest_mod.worker(3, 1024, str(work_dir), [], mode, "0000", False, True, 0)
+    lines = [line for line in capsys.readouterr().out.splitlines() if "\tFile " in line]
+    assert len(lines) == 3
+    assert all(re.search(r"\t%s\t\d+\.\d+(e-\d+)? s" % verb, line) for line in lines), lines
+
+
+@pytest.mark.parametrize("role,verb", [("write", "Wrote"), ("read", "Read")])
+def test_verbose_simultaneous_workers_log_their_mode_ops_lateness_and_end(iotest_mod, work_dir, capsys, role, verb):
+    iotest_mod.layout_read_worker(3, 1024, str(work_dir), "t", "0000", True, True)
+    capsys.readouterr()
+    late = []
+    iotest_mod.worker(3, 1024, str(work_dir), [], role, "0000", False, True, iotest_mod.shared_clock() - 5,
+        late_starts=late, simultaneous_run_id="t")
+    lines = capsys.readouterr().out.splitlines()
+    assert re.search(r"Worker 0000 scheduled to start at -\d+\.\d{4} later in %s mode\.\x1b" % role, lines[0])
+    assert len(late) == 1 and late[0] >= 5
+    assert len([line for line in lines if "Worker 0000 started late, expected start time " in line]) == 1
+    assert len([line for line in lines if "\tFile " in line and "\t%s\t" % verb in line]) == 3
+    assert lines[-1].endswith("Worker 0000 finished.\x1b[0m")
 
 
 def test_verbose_workers_log_each_op_as_before(iotest_mod, work_dir, capsys):

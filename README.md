@@ -4,7 +4,7 @@ Ever feel like fio is too complicated and too optimized? Well, simple-iotest cov
 
 Using the most simple non-optimized write() or writev() (just like your code!) to test file system io performance.
 
-Warning: a worker that writes or reads holds a whole test file in memory (random and comprehensive workers, and a reader that recreates missing files, two of them; index and meta workers none), unless `-bs` is set: then up to 16 MiB of test data and one block. iotest also keeps about 80 to 140 bytes per operation for the results until the run ends (70 to 110 more with `-tl`). Before it starts, it estimates the memory the run needs: if that is more than the available memory plus swap, it lowers the process count; if it is more than 90% of the available memory, it warns and waits 15 seconds before going on.
+Warning: a worker that writes or reads holds a whole test file in memory (random and comprehensive workers, and a reader that recreates missing files, two of them; index and meta workers none), unless `-bs` is set: then up to 16 MiB of test data and one block. iotest also keeps about 80 to 140 bytes per operation for the results until the run ends (70 to 110 more with `-tl`). Before it starts, it estimates the memory the run needs: if that is more than the available memory plus swap, it lowers the process count (a simultaneous run keeps 2); if it is more than 90% of the available memory, it warns and waits 15 seconds before going on.
 
 Note:
 	Tee_Logger is a required dependency and is installed automatically. Results are also logged to `/var/log/` by default (change it with `-ld`, or turn it off with `-nl`) for future keeping.
@@ -65,7 +65,7 @@ Default mode is **write** (`w`) when no mode is specified.
 - `random`: Random read/write steps. Reads and writes are reported separately, as `random_write` and `random_read` (and as separate CSV columns); both use the whole pass's wall time for the sync figures.  
 - `comprehensive` / `c`: write → move → stat → read per file. Each section ends with a note that its sync figures are estimates: the pass time is split across write/move/stat/read by their share of op time.  
 - `rw` / `wr`: Run write, then read sequentially in batch mode.  
-- `simultaneous` / `s`: Pre-writes read targets, then runs half the workers writing and half reading concurrently on separate files. Removes all temp files when done. It needs at least 2 processes: with one, iotest ends in a traceback and exits 1. If this layout pass cannot write every read file, the timed pass is skipped, the failures are reported under the result key `layout` (`Failed layout ops: <failed> of <read files>`, an empty `layout_time` column in the CSV), and iotest exits 1.  
+- `simultaneous` / `s`: Pre-writes read targets, then runs half the workers writing and half reading concurrently on separate files. Removes all temp files when done. It needs at least 2 processes, a writer and a reader: `-pc 1` exits 2, and the memory check keeps 2. If this layout pass cannot write every read file, the timed pass is skipped, the failures are reported under the result key `layout` (`Failed layout ops: <failed> of <read files>`, an empty `layout_time` column in the CSV), and iotest exits 1.  
 - `rwi` / `wri`: Run write, then read, then index sequentially in batch mode.
 
 Example:
@@ -194,6 +194,14 @@ options:
                         min' +%s)), so several hosts start together. Clocks must be in sync
   -V, --version         show program's version number and exit
 ```
+
+## Upgrading to 3.72.0 from 3.71.0
+
+- Nothing needs doing. The options, test files, reports, CSV, JSON and timeline are unchanged.
+- `simultaneous` with one process (`-pc 1`, or a `-ts` that works out to one) is an invalid argument: iotest exits 2 before anything runs. 3.71.0 ran the passes before it, then ended in a traceback (exit 1). The memory check no longer cuts a simultaneous run below 2 processes, and says "Reducing the number of processes" only when the count drops; throughput tuning (`-wtpt`, `-rtpt`) of a simultaneous run goes on from the split the run used after a cut. The error names `-ts` when `-ts` worked the count out.
+- On macOS with Python 3.8 or 3.9 (Apple's `/usr/bin/python3` is 3.9), each pass starts after the usual short delay. 3.71.0 waited before each pass about as long as the run had lasted, and its sync bandwidth and IOPS counted that wait. By CPython's source, Windows before Python 3.10 did the same, and is fixed the same way (not run there); only the start is handed on a clock that ticks every 15.6 ms there, so workers may start up to that far apart and a pass's sync time may be off by that much.
+- The memory warning waits the 15 seconds it says (it waited 16).
+- For code that imports iotest: `worker()` takes its start time on `shared_clock()`, which is `time.perf_counter()` from Python 3.10, as before, and `run_iotest()` raises its `ValueError` for simultaneous with one process before any pass runs.
 
 ## Upgrading to 3.71.0 from 3.70.1
 
