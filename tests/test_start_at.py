@@ -142,16 +142,20 @@ def test_worker_turns_the_shared_start_into_its_own_clock(iotest_mod, work_dir, 
 def test_spawned_workers_start_on_time_when_the_parents_clock_differs(run_main, rec_tl, monkeypatch, modes, start_in, parent_offset):
     # spawned workers do not see this patch: the parent's perf_counter() runs ahead of theirs (120 s: a failure then
     # takes two minutes, not an hour), as a parent's did on macOS with Python 3.9 (a spawned worker is younger), or
-    # behind. 3.71.0's workers waited as long as it was ahead, or started that late
+    # behind. 3.71.0's workers waited as long as it was ahead, or started that late. A wait the parent compensates
+    # for in its own wall time (it started the pass 120 s late, by its own clock) shows only in how long the run took
     previous = multiprocessing.get_start_method(allow_none=True)
     multiprocessing.set_start_method("spawn", force=True)
     real_perf = time.perf_counter
     monkeypatch.setattr(time, "perf_counter", lambda: real_perf() + parent_offset)
     start_at = None if start_in is None else time.time() + start_in
+    began = real_perf()
     try:
         result = run_main(modes, process_count=2, tl=rec_tl, start_at=start_at)
     finally:
         multiprocessing.set_start_method(previous, force=True)
+    # a run that starts on time takes seconds (the --start_at case waits 3 of them)
+    assert real_perf() - began < 60
     assert result["failedOps"] == {key: [] for key in result["outResults"]}
     for count, longest in result["late_starts"].values():
         assert longest < 60
