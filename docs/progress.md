@@ -7,15 +7,11 @@ Open work lives here and nowhere else (RULES, "Long work: the progress file"). E
 
 ## Open work
 
-### simple-iotest 3.72.0 (no written plan; from the 3.71.0 reviews)
-- **`-pc 1 simultaneous`: an argument error (exit 2) instead of a traceback.** State: built on feat/3720 (1c0e6b3, 2026-11-23); final review: fix first (on macOS with Python 3.10+ a pass's wall time came to count time asleep: measurements go back to perf_counter, only the start is handed on the shared clock), fix round f3720 done (5a7d8ed to 1580a8a: measurements back on perf_counter, only the start on the shared clock; the tuner after a memory cut; messages; tests); re-review: release after one change (from Python 3.10 the start is handed on perf_counter too, so a Mac asleep while workers start is not misread), a last round (f3720b) running. The deferred entry in docs/limitations.md has the plan: parser.error after `-ts` when simultaneous and the process count is below 2; the memory cut keeps 2 processes for simultaneous. From: the 3.70.1 survey (a deferral, not asked).
-- **Tests the 3.71.0 reviews found missing (also untested in 3.70.1).** State: built on feat/3720 (125ce11), in final review. stat_file's failure tuple; comprehensive's wall-time split; the `-v` verb `Wrote`; the simultaneous `-v` lines ("in write mode", "finished", the late-start line). From: the 3.71.0 final review and second opinions.
-- **The "continue anyway in 15 seconds" message sleeps 16 s.** State: built on feat/3720, in final review; pick one number at the source (the message and the sleep), then the README. Also in 3.70.1. From: the 3.71.0 second opinions.
-
-- **Workers' start time on a clock all processes share** (on macOS with Python 3.8 or 3.9 each pass waits as long as the run has lasted, and sync bandwidth and IOPS are wrong; 3.70.1 too). State: built on feat/3720, in final review; the plan is in the deferred entry in docs/limitations.md. From: the week-48 cas-toolbox roll-up gate on the test Mac, 2026-11-21 (a deferral, not asked).
+### simple-iotest 3.73.0
+- **Nothing queued.** The next version starts from what 3.72.0's review or an operator finds. State: none open.
 
 ### Standing rows
-- **Deferred work** is in `docs/limitations.md` (entries of kind "deferred"); each names when it is revisited. Two entries today: `-pc 1 simultaneous` and the workers' start clock (3.72.0, the rows above).
+- **Deferred work** is in `docs/limitations.md` (entries of kind "deferred"); each names when it is revisited. None today: 3.72.0 settled both.
 
 ## Standing decisions
 The user's rulings on how the cas repos are worked, one line each; a line changes only on the user's word. The cas monorepo's CLAUDE.md holds the same list, with how to reach the test machines.
@@ -33,5 +29,6 @@ The user's rulings on how the cas repos are worked, one line each; a line change
 - None. Decided 2026-11-15, a chief's decision (not the user's words): remove the os.writev/os.readv retry through f.write/f.readinto; the release notes say that a write or read now fails on its first error (built in dfab87b).
 
 ## Closed
+- 3.72.0 (tag v3.72.0, the merge of feat/3720 a21e5f4, released 2026-11-23): on macOS with Python 3.8 or 3.9 passes start on time and the sync figures are right (the start is handed between processes on a clock all share, `perf_counter()` from Python 3.10, and every measurement stays on `perf_counter()`); `-pc 1` with simultaneous mode is an argument error (exit 2); the memory cut keeps 2 processes for simultaneous and the tuner goes on from the split the run used; the memory warning waits the 15 s it says; tests the 3.71.0 reviews found missing. Build b3720, final review fr3720 (Fable high: fix first: a pass's wall time counted a Mac's sleep), fix round f3720, re-review rr3720 (Opus xhigh: release after the hand-over clock from 3.10), last round f3720b; suites 605 on 3.14 and 3.11, 604 on 3.6, 603 on 3.12 and 3.9, the Mac 573 and 571, EL7 603, first runs; PyPI wheel f8d3fea3 and sdist 4c03f1e1 match the build; GitHub release v3.72.0. cas-toolbox pins it after its full gate.
 - 3.71.0 (tag v3.71.0, the merge of feat/simplify, released 2026-11-16): the simplify pass (iotest.py 2,790 to 2,457 lines; the user, 2026-10-23, and "Run it on all three (Recommended)", 2026-11-14), behaviour unchanged apart from the os.writev/os.readv retry, removed (a chief's decision of 2026-11-15: a refused write or read fails on its first error); Python 3.11 in CI ("Add 3.11 to CI (Recommended)", 2026-11-12); a README trim; docs/limitations.md with the `-pc 1 simultaneous` deferral. Final review release after docs; fix round 1 docs and tests (a23910f, 5bcb224); re-review release; texts f90e6c8, 70fc1dd. Main CI green on all nine jobs; macOS green on a rerun of its job, whose first attempt never ran (GitHub: "The job was not acquired by Runner of type hosted even after multiple attempts", macOS capacity).
 - None.
