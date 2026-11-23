@@ -71,14 +71,14 @@ def test_f_nocache_is_skipped_without_the_constant(iotest_mod, tmp_path, monkeyp
 
 def test_late_worker_is_recorded(iotest_mod, work_dir):
     late = []
-    start = iotest_mod.time.perf_counter() - 5
+    start = iotest_mod.shared_clock() - 5
     iotest_mod.worker(1, 1024, str(work_dir), [], "write", "0", True, True, start, False, False, late)
     assert len(late) == 1 and late[0] >= 5
 
 
 def test_punctual_worker_is_not_recorded(iotest_mod, work_dir):
     late = []
-    start = iotest_mod.time.perf_counter() + 0.3
+    start = iotest_mod.shared_clock() + 0.3
     iotest_mod.worker(1, 1024, str(work_dir), [], "write", "0", True, True, start, False, False, late)
     assert late == []
 
@@ -281,11 +281,12 @@ def test_simultaneous_reader_allocates_its_buffer_before_the_start_barrier(iotes
         return real(*args)
 
     monkeypatch.setattr(iotest_mod, "bytearray", spy, raising=False)
-    start = iotest_mod.time.perf_counter() + 0.3
+    # the start goes in on shared_clock(); the worker's own clock is perf_counter()
+    start, local_start = iotest_mod.shared_clock() + 0.3, iotest_mod.time.perf_counter() + 0.3
     results = []
     iotest_mod.worker(1, 4096, str(work_dir), results, "read", iotest_mod.worker_counter_name(0), True, True, start,
         simultaneous_run_id="t")
-    assert len(made_at) == 1 and made_at[0] < start
+    assert len(made_at) == 1 and made_at[0] < local_start
     assert not [s for s in iotest_mod.result_samples(results) if isinstance(s, str)]
 
 

@@ -1,8 +1,12 @@
+import array
 import json
+import multiprocessing
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 import iotest
 
@@ -22,7 +26,7 @@ def spy_barriers(monkeypatch):
     real = iotest.first_pass_start
 
     def spy(*args):
-        before = (time.perf_counter(), time.time())
+        before = (iotest.shared_clock(), time.time())
         barrier = real(*args)
         seen.append((barrier, before))
         return barrier
@@ -37,8 +41,8 @@ def test_start_at_holds_first_pass_until_the_time(run_main, rec_tl, monkeypatch)
     run_main(["write", "read"], tl=rec_tl, start_at=start_at)
     # one synchronized pass; the second pass schedules itself as usual
     assert len(seen) == 1
-    barrier, (perf_before, wall_before) = seen[0]
-    assert barrier - perf_before >= start_at - wall_before - 0.01
+    barrier, (clock_before, wall_before) = seen[0]
+    assert barrier - clock_before >= start_at - wall_before - 0.01
     assert time.time() >= start_at
     assert any(p.startswith("Synchronized start at ") and p.endswith("(--start_at)") for p in rec_tl.printed[-1].splitlines())
     assert not any("too soon" in m for m in rec_tl.logged)
@@ -116,6 +120,42 @@ def test_barrier_wait_sleeps_once_until_a_second_before(monkeypatch):
     iotest.wait_for_barrier(time.perf_counter() + 3)
     assert 1.9 < sleeps[0] <= 2.0
     assert len(sleeps) > 1 and all(s == 0.001 for s in sleeps[1:])
+
+
+def test_worker_turns_the_shared_start_into_its_own_clock(iotest_mod, work_dir, monkeypatch):
+    # a spawned worker's perf_counter() can count from its own start (macOS and Windows before Python 3.10), so it
+    # gets the start on shared_clock() and moves it onto perf_counter(): here perf_counter() is an hour ahead
+    real_perf = time.perf_counter
+    monkeypatch.setattr(time, "perf_counter", lambda: real_perf() + 3600)
+    late, sink = [], []
+    iotest_mod.worker(1, 1024, str(work_dir), [], "write", "0", True, True, iotest_mod.shared_clock() + 0.3, False,
+        False, late, timeline=sink)
+    assert late == []
+    (record,) = sink
+    # the op's start, in seconds from the barrier
+    (op_start,) = array.array("d", record[3])
+    assert 0 <= op_start < 60
+
+
+@pytest.mark.parametrize("modes,start_in", [(["write"], None), (["simultaneous"], None), (["write"], 3)])
+def test_spawned_workers_start_on_time_when_the_parents_clock_differs(run_main, rec_tl, monkeypatch, modes, start_in):
+    # spawned workers do not see this patch: the parent's perf_counter() runs an hour behind theirs, as a parent's
+    # and a spawned worker's did on macOS with Python 3.9 (by the parent's age). 3.71.0's workers started an hour
+    # late, or (the other way round) waited as long
+    previous = multiprocessing.get_start_method(allow_none=True)
+    multiprocessing.set_start_method("spawn", force=True)
+    real_perf = time.perf_counter
+    monkeypatch.setattr(time, "perf_counter", lambda: real_perf() - 3600)
+    start_at = None if start_in is None else time.time() + start_in
+    try:
+        result = run_main(modes, process_count=2, tl=rec_tl, start_at=start_at)
+    finally:
+        multiprocessing.set_start_method(previous, force=True)
+    assert result["failedOps"] == {key: [] for key in result["outResults"]}
+    for count, longest in result["late_starts"].values():
+        assert longest < 60
+    for seconds in result["totalTime"].values():
+        assert 0 < seconds < 60
 
 
 def test_start_late_is_null_when_no_pass_ran_at_start_at(iotest_mod, run_main, rec_tl, work_dir, tmp_path):

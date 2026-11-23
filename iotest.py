@@ -591,6 +591,18 @@ def worker_color_log(color, msg, quiet=False):
 	r, g, b = color
 	worker_log(f'\033[38;2;{r};{g};{b}m{msg}\033[0m', quiet=quiet)
 
+# The clock the parent gives workers their start time on, one that every process of the host reads alike.
+# perf_counter(), which times the ops, is not one on macOS and Windows before Python 3.10, nor monotonic() on macOS:
+# both counted from the process's own first call there, so a spawned worker read its parent's start time as that
+# parent's age ahead of it. CLOCK_MONOTONIC is the kernel's (Linux, macOS, the BSDs). Windows has no clock_gettime:
+# its perf_counter() is shared from 3.10, its monotonic() (GetTickCount64, in 15.6 ms steps) on every version
+if hasattr(time, 'clock_gettime') and hasattr(time, 'CLOCK_MONOTONIC'):
+	shared_clock = functools.partial(time.clock_gettime, time.CLOCK_MONOTONIC)
+elif sys.version_info >= (3, 10):
+	shared_clock = time.perf_counter
+else:
+	shared_clock = time.monotonic
+
 def wait_for_barrier(start_time):
 	# one long sleep until about 1 s before the barrier, then the 1 ms loop for the precise start
 	ahead = start_time - time.perf_counter() - 1
@@ -605,7 +617,9 @@ OP_VERBS = {'write': 'Wrote', 'read': 'Read', 'index': 'Indexed', 'create': 'Cre
 def worker(file_count, file_size, directory, results, mode, counter, quiet, zeros, thread_start_time, unique=False, recreates=False, late_starts=None, progress_to_stderr=False, timeline=None, block_size=None, verify=False, simultaneous_run_id=None):
 	# every timed pass's worker; with simultaneous_run_id, a simultaneous pass's writer or reader (mode write or
 	# read) on its own files in that run's tree. The ops append to a list as they go; it becomes one compact
-	# record after the last
+	# record after the last. thread_start_time, the pass's start, comes on shared_clock(): from here on it is on this
+	# process's perf_counter(), like the ops
+	thread_start_time = time.perf_counter() + (thread_start_time - shared_clock())
 	local_results = []
 	local_kinds = [] if mode == 'random' else None
 	# only with --timeline; without it the loop below does no timeline work beyond a None check
@@ -1536,8 +1550,9 @@ def write_json_summary(path, summary, tl, report_errors):
 
 def first_pass_start(start_at, process_start_delay, tl, start_notes, start_late):
 	# the synchronized pass waits for start_at; if too little time is left for the
-	# workers to prime, it starts after the usual delay instead and says how late
-	now = time.perf_counter()
+	# workers to prime, it starts after the usual delay instead and says how late. On shared_clock(), like every
+	# pass's start
+	now = shared_clock()
 	remaining = start_at - time.time()
 	start_notes.append(f"Synchronized start at {datetime.datetime.fromtimestamp(start_at).astimezone().isoformat(timespec='seconds')} (--start_at)")
 	if remaining >= process_start_delay:
@@ -1766,7 +1781,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 						thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes, start_late)
 						sync_start_at = None
 					else:
-						thread_start_time = time.perf_counter() + processStartDelay
+						thread_start_time = shared_clock() + processStartDelay
 					tl.teeprint(f"Simultaneous mode: {write_count} writers + {read_count} readers...")
 					def role_workers(role, count, role_results, role_late):
 						# the first workers of the role: tuning attempts at smaller counts overwrite the same writer
@@ -1780,10 +1795,10 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 					start_processes(write_processes + read_processes)
 					for p in write_processes:
 						p.join()
-					write_sync_time = time.perf_counter() - totalStartTime
+					write_sync_time = shared_clock() - totalStartTime
 					for p in read_processes:
 						p.join()
-					read_sync_time = time.perf_counter() - totalStartTime
+					read_sync_time = shared_clock() - totalStartTime
 					# one bulk fetch per list: iterating a proxy costs a round trip per item
 					write_results, read_results = write_results[:], read_results[:]
 					write_late, read_late = write_late[:], read_late[:]
@@ -1806,7 +1821,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				thread_start_time = first_pass_start(sync_start_at, processStartDelay, tl, start_notes, start_late)
 				sync_start_at = None
 			else:
-				thread_start_time = time.perf_counter() + processStartDelay
+				thread_start_time = shared_clock() + processStartDelay
 			for counter in range(process_count):
 				assigned_directory = directories[counter % len(directories)]
 				recreates = pass_recreates is not None and pass_recreates[counter]
@@ -1817,7 +1832,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 			start_processes(processes)
 			for p in processes:
 				p.join()
-			totalEndTime =  time.perf_counter() - totalStartTime
+			totalEndTime = shared_clock() - totalStartTime
 			dead_errors = dead_worker_errors(processes, file_count)
 			processes.clear()
 			# one bulk fetch per list: iterating a proxy costs a round trip per item

@@ -249,10 +249,11 @@ def test_read_worker_that_will_recreate_generates_before_the_start_barrier(iotes
     real = iotest_mod.make_file_content
     monkeypatch.setattr(iotest_mod, "make_file_content",
         lambda *a, **k: made_at.append(iotest_mod.time.perf_counter()) or real(*a, **k))
-    start = iotest_mod.time.perf_counter() + 0.3
+    # the start goes in on shared_clock(); the worker's own clock is perf_counter()
+    start, local_start = iotest_mod.shared_clock() + 0.3, iotest_mod.time.perf_counter() + 0.3
     iotest_mod.worker(1, 4096, str(work_dir), [], "read", "0", True, True, start, False, True)
     assert len(made_at) == 1
-    assert made_at[0] < start
+    assert made_at[0] < local_start
 
 
 def test_memory_cut_keeps_the_files_of_the_first_workers(run_main, iotest_mod, monkeypatch):
