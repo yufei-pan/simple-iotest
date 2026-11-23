@@ -591,17 +591,26 @@ def worker_color_log(color, msg, quiet=False):
 	r, g, b = color
 	worker_log(f'\033[38;2;{r};{g};{b}m{msg}\033[0m', quiet=quiet)
 
-# The clock the parent gives workers their start time on, one that every process of the host reads alike.
-# perf_counter(), which times the ops, is not one on macOS and Windows before Python 3.10, nor monotonic() on macOS:
-# both counted from the process's own first call there, so a spawned worker read its parent's start time as that
-# parent's age ahead of it. CLOCK_MONOTONIC is the kernel's (Linux, macOS, the BSDs). Windows has no clock_gettime:
-# its perf_counter() is shared from 3.10, its monotonic() (GetTickCount64, in 15.6 ms steps) on every version
+# The clock the parent gives workers their start time on, one that every process of the host reads alike. Only the
+# hand-over is on it: every time iotest measures is on perf_counter(), which counts no time asleep (the kernel's
+# clock does, on macOS) and has no steps. perf_counter() is not shared on macOS and Windows before Python 3.10, nor
+# is monotonic() on macOS: both counted from the process's own first call there, so a spawned worker read its
+# parent's start time as that parent's age ahead of it. CLOCK_MONOTONIC is the kernel's (Linux, macOS, the BSDs).
+# Not every build has it: Windows never does, and python.org's macOS installers of 3.7 and 3.8 do not (built for
+# macOS 10.9; bugs.python.org issue 39203). Then perf_counter() from Python 3.10, Windows's monotonic() before
+# (GetTickCount64, in 15.6 ms steps), and anywhere else the wall clock, which can step but is shared
 if hasattr(time, 'clock_gettime') and hasattr(time, 'CLOCK_MONOTONIC'):
 	shared_clock = functools.partial(time.clock_gettime, time.CLOCK_MONOTONIC)
 elif sys.version_info >= (3, 10):
 	shared_clock = time.perf_counter
-else:
+elif sys.platform == 'win32':
 	shared_clock = time.monotonic
+else:
+	shared_clock = time.time
+
+def own_clock(shared_time):
+	# a time on shared_clock(), moved onto this process's perf_counter()
+	return time.perf_counter() + (shared_time - shared_clock())
 
 def wait_for_barrier(start_time):
 	# one long sleep until about 1 s before the barrier, then the 1 ms loop for the precise start
@@ -619,7 +628,7 @@ def worker(file_count, file_size, directory, results, mode, counter, quiet, zero
 	# read) on its own files in that run's tree. The ops append to a list as they go; it becomes one compact
 	# record after the last. thread_start_time, the pass's start, comes on shared_clock(): from here on it is on this
 	# process's perf_counter(), like the ops
-	thread_start_time = time.perf_counter() + (thread_start_time - shared_clock())
+	thread_start_time = own_clock(thread_start_time)
 	local_results = []
 	local_kinds = [] if mode == 'random' else None
 	# only with --timeline; without it the loop below does no timeline work beyond a None check
@@ -1791,14 +1800,14 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 							role_late, False, pass_timeline, block_size, verify, run_id)) for counter in range(count)]
 					write_processes = role_workers('write', write_count, write_results, write_late)
 					read_processes = role_workers('read', read_count, read_results, read_late)
-					totalStartTime = thread_start_time
+					totalStartTime = own_clock(thread_start_time)
 					start_processes(write_processes + read_processes)
 					for p in write_processes:
 						p.join()
-					write_sync_time = shared_clock() - totalStartTime
+					write_sync_time = time.perf_counter() - totalStartTime
 					for p in read_processes:
 						p.join()
-					read_sync_time = shared_clock() - totalStartTime
+					read_sync_time = time.perf_counter() - totalStartTime
 					# one bulk fetch per list: iterating a proxy costs a round trip per item
 					write_results, read_results = write_results[:], read_results[:]
 					write_late, read_late = write_late[:], read_late[:]
@@ -1828,11 +1837,11 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 				counter = worker_counter_name(counter)
 				p = Process(target=worker, args=(file_count, file_size, assigned_directory, results, mode, counter, quiet, zeros, thread_start_time, unique, recreates, late, json_to_stdout, pass_timeline, block_size, verify))
 				processes.append(p)
-			totalStartTime = thread_start_time
+			totalStartTime = own_clock(thread_start_time)
 			start_processes(processes)
 			for p in processes:
 				p.join()
-			totalEndTime = shared_clock() - totalStartTime
+			totalEndTime = time.perf_counter() - totalStartTime
 			dead_errors = dead_worker_errors(processes, file_count)
 			processes.clear()
 			# one bulk fetch per list: iterating a proxy costs a round trip per item

@@ -138,14 +138,15 @@ def test_worker_turns_the_shared_start_into_its_own_clock(iotest_mod, work_dir, 
 
 
 @pytest.mark.parametrize("modes,start_in", [(["write"], None), (["simultaneous"], None), (["write"], 3)])
-def test_spawned_workers_start_on_time_when_the_parents_clock_differs(run_main, rec_tl, monkeypatch, modes, start_in):
-    # spawned workers do not see this patch: the parent's perf_counter() runs an hour behind theirs, as a parent's
-    # and a spawned worker's did on macOS with Python 3.9 (by the parent's age). 3.71.0's workers started an hour
-    # late, or (the other way round) waited as long
+@pytest.mark.parametrize("parent_offset", [-3600, 120])
+def test_spawned_workers_start_on_time_when_the_parents_clock_differs(run_main, rec_tl, monkeypatch, modes, start_in, parent_offset):
+    # spawned workers do not see this patch: the parent's perf_counter() runs ahead of theirs (120 s: a failure then
+    # takes two minutes, not an hour), as a parent's did on macOS with Python 3.9 (a spawned worker is younger), or
+    # behind. 3.71.0's workers waited as long as it was ahead, or started that late
     previous = multiprocessing.get_start_method(allow_none=True)
     multiprocessing.set_start_method("spawn", force=True)
     real_perf = time.perf_counter
-    monkeypatch.setattr(time, "perf_counter", lambda: real_perf() - 3600)
+    monkeypatch.setattr(time, "perf_counter", lambda: real_perf() + parent_offset)
     start_at = None if start_in is None else time.time() + start_in
     try:
         result = run_main(modes, process_count=2, tl=rec_tl, start_at=start_at)
@@ -156,6 +157,47 @@ def test_spawned_workers_start_on_time_when_the_parents_clock_differs(run_main, 
         assert longest < 60
     for seconds in result["totalTime"].values():
         assert 0 < seconds < 60
+
+
+def test_a_pass_is_timed_on_perf_counter_whatever_the_shared_clock_counts(run_main, iotest_mod, monkeypatch):
+    # shared_clock() only carries the start to the workers. Where it counts time perf_counter() does not (a Mac
+    # asleep), the pass's wall time must not: here it jumps an hour once the pass's workers have been started
+    # (a read of files that are there starts no other processes)
+    run_main(["write"], process_count=2)
+    real_start, real_clock, jump = iotest_mod.start_processes, iotest_mod.shared_clock, [0]
+    monkeypatch.setattr(iotest_mod, "shared_clock", lambda: real_clock() + jump[0])
+
+    def start(processes):
+        real_start(processes)
+        jump[0] += 3600
+
+    monkeypatch.setattr(iotest_mod, "start_processes", start)
+    result = run_main(["read"], process_count=2)
+    assert jump[0] == 3600
+    assert result["failedOps"] == {"read": []}
+    assert 0 < result["totalTime"]["read"] < 60
+
+
+def test_shared_clock_without_clock_gettime_is_one_every_process_reads_alike():
+    # python.org's macOS installers of 3.7 and 3.8 have no time.clock_gettime, and there monotonic() counts from the
+    # process's start (as perf_counter() does before 3.10): the wall clock is the one every process reads alike
+    code = ("import time\n"
+            "try:\n    del time.clock_gettime\nexcept AttributeError:\n    pass\n"
+            "import iotest\n"
+            "print(next(name for name in ('perf_counter', 'monotonic', 'time') if getattr(time, name) is iotest.shared_clock))")
+    proc = subprocess.run([sys.executable, "-c", code], cwd=str(MODULE.parent), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          universal_newlines=True, check=False)
+    expected = "perf_counter" if sys.version_info >= (3, 10) else "monotonic" if sys.platform == "win32" else "time"
+    assert proc.stdout.strip() == expected, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("seconds", [5, -5])
+def test_own_clock_moves_a_shared_time_onto_perf_counter(iotest_mod, monkeypatch, seconds):
+    # a time on shared_clock(), as many seconds ahead of (or behind) now, on a perf_counter() that is an hour ahead;
+    # the two reads are microseconds apart, so half a second is room for a slow host
+    real_perf = time.perf_counter
+    monkeypatch.setattr(time, "perf_counter", lambda: real_perf() + 3600)
+    assert iotest_mod.own_clock(iotest_mod.shared_clock() + seconds) == pytest.approx(time.perf_counter() + seconds, abs=0.5)
 
 
 def test_start_late_is_null_when_no_pass_ran_at_start_at(iotest_mod, run_main, rec_tl, work_dir, tmp_path):

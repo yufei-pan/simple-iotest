@@ -184,12 +184,25 @@ def test_comprehensive_sections_carry_the_estimate_note(run_main, rec_tl):
     assert note + "\n" + "-" * 80 in text
 
 
-def test_comprehensive_splits_the_pass_time_by_op_time(run_main):
-    # write, move, stat and read share the pass's wall time in proportion to their op time
+def test_comprehensive_splits_the_pass_time_by_op_time(run_main, iotest_mod, monkeypatch):
+    # write, move, stat and read share the pass's wall time in proportion to their op time. The parent's clock jumps
+    # 1000 s once a pass's workers have been started, so the wall time is 1000 s plus what the pass really took,
+    # which is less than the whole run took
+    real_start, real_perf, jump = iotest_mod.start_processes, iotest_mod.time.perf_counter, [0]
+    monkeypatch.setattr(iotest_mod.time, "perf_counter", lambda: real_perf() + jump[0])
+
+    def start(processes):
+        real_start(processes)
+        jump[0] += 1000
+
+    monkeypatch.setattr(iotest_mod, "start_processes", start)
+    began = real_perf()
     result = run_main(["comprehensive"], file_count=4)
+    run_time = real_perf() - began
     keys = ("write", "move", "stat", "read")
     op_time = {key: sum(result["outResults"][key]) for key in keys}
     pass_time = sum(result["totalTime"][key] for key in keys)
+    assert 1000 <= pass_time <= 1000 + run_time
     for key in keys:
         assert result["totalTime"][key] == pytest.approx(pass_time * op_time[key] / sum(op_time.values()))
 
