@@ -1,4 +1,5 @@
 import os
+import re
 import tracemalloc
 
 import pytest
@@ -171,6 +172,18 @@ def test_memory_cut_keeps_at_least_one_simultaneous_reader(run_main, iotest_mod,
     result = run_main(["simultaneous"], process_count=4, simultaneous_write_count=3)
     assert result["process_count"] == 2
     assert result["mode_process_counts"] == {"write": 1, "read": 1}
+
+
+def test_memory_warning_waits_as_long_as_it_says(run_main, iotest_mod, monkeypatch, rec_tl):
+    # little RAM but plenty of swap: no process cut, but the 90% warning pauses before the run
+    sleeps = []
+    monkeypatch.setattr(iotest_mod.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(iotest_mod, "read_meminfo", lambda: (1000, 10**9))
+    run_main(["write"], tl=rec_tl)
+    (line,) = [m for m in rec_tl.logged if "continue anyway in" in m]
+    said = int(re.search(r"continue anyway in (\d+) seconds", line).group(1))
+    # the parent's first sleep is the pause (forked workers' barrier sleeps land in their own copy of the list)
+    assert sleeps[0] == said == 15
 
 
 def test_memory_cut_keeps_two_simultaneous_processes(run_main, iotest_mod, monkeypatch, rec_tl):

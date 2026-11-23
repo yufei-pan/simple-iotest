@@ -1276,6 +1276,10 @@ def workers_memory(modes, buffer_size, file_count, recreates, timeline=False, re
 	figures = [memory_per_process(modes, buffer_size, file_count, flag, timeline, read_size) for flag in (False, True)]
 	return [figures[1 if flag else 0] for flag in recreates]
 
+# seconds the run waits after warning that it may push the system into swap, to read the warning and press Ctrl+C:
+# what the warning has said since it came in (2025-02), and the README too (the sleep was 16 s until 3.72.0)
+MEMORY_WARNING_PAUSE = 15
+
 def fitting_process_count(worker_memory, available, fewest=1):
 	# how many of the first workers fit in the available memory together, at least fewest
 	total = 0
@@ -1636,7 +1640,7 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		tl.teelog(f"Reducing simultaneous writers from {simultaneous_write_count} to {process_count - 1} to keep a reader", level='warning')
 		simultaneous_write_count = process_count - 1
 	estimatedTotalMemory = sum(worker_memory[:process_count])
-	# the disk check needs the final process_count, but runs before the 16 s memory pause
+	# the disk check needs the final process_count, but runs before the memory pause
 	needed, cow_extra = space_needed(modes, file_size, file_count, process_count, directories,
 		simultaneous_write_count=simultaneous_write_count, layout_worker_count=simultaneous_layout_workers,
 		skip_layout=simultaneous_skip_layout, mountinfo_lines=mountinfo, scan=scan)
@@ -1652,8 +1656,8 @@ def run_iotest(options, tl=None, tuning_attempt=False, simultaneous_write_count=
 		tl.teeerror(f"Available memory: {format_bytes(phyFreeMemory)}B")
 		tl.teeerror(f"Estimated total memory usage: {format_bytes(estimatedTotalMemory)}B")
 		tl.teelog("If continuing, iotest will likely put very heavy pressure on swap memory and may lead to system crash.",level='critical')
-		tl.teelog("Exit now (press Ctrl+C) or iotest will continue anyway in 15 seconds...",level='critical')
-		time.sleep(16)
+		tl.teelog(f"Exit now (press Ctrl+C) or iotest will continue anyway in {MEMORY_WARNING_PAUSE} seconds...",level='critical')
+		time.sleep(MEMORY_WARNING_PAUSE)
 		tl.teelog("Warning! Continuing anyway... ",level='warning')
 	with Manager() as manager:
 		# bench mark file generation performance first
