@@ -195,6 +195,14 @@ options:
   -V, --version         show program's version number and exit
 ```
 
+## Upgrading to 3.72.0 from 3.71.0
+
+- Nothing needs doing. The options, test files, reports, CSV, JSON and timeline are unchanged.
+- `simultaneous` with one process (`-pc 1`, or a `-ts` that works out to one) is an invalid argument: iotest exits 2 before anything runs. 3.71.0 ran the passes before it, then ended in a traceback (exit 1). The memory check no longer cuts a simultaneous run below 2 processes.
+- On macOS with Python 3.8 or 3.9 (Apple's `/usr/bin/python3` is 3.9), each pass starts after the usual short delay. 3.71.0 waited before each pass about as long as the run had lasted, and its sync bandwidth and IOPS counted that wait. By CPython's source, Windows before Python 3.10 did the same, and is fixed the same way (not run there).
+- The memory warning waits the 15 seconds it says (it waited 16).
+- For code that imports iotest: `worker()` takes its start time on `shared_clock()` (`CLOCK_MONOTONIC`, the same clock as `time.perf_counter()` on Linux), and `run_iotest()` raises its `ValueError` for simultaneous with one process before any pass runs.
+
 ## Upgrading to 3.71.0 from 3.70.1
 
 - Nothing needs doing. The options, test files, reports, CSV, JSON and timeline are unchanged.
